@@ -138,7 +138,7 @@ func NewContext(q *dns.Msg, meta *RequestMeta) *Context {
 // String returns a short summery of its query.
 func (ctx *Context) String() string {
 	var question string
-	// var clientAddr string
+	// var clientAddr string  // <-- Comment dòng này
 
 	if len(ctx.q.Question) >= 1 {
 		q := ctx.q.Question[0]
@@ -146,7 +146,8 @@ func (ctx *Context) String() string {
 	} else {
 		question = "empty question"
 	}
-
+	
+	// Comment toàn bộ phần xử lý clientAddr
 	/*
 	if ctx.reqMeta.clientAddr.IsValid() {
 		clientAddr = ctx.reqMeta.clientAddr.String()
@@ -155,7 +156,9 @@ func (ctx *Context) String() string {
 	}
 	*/
 
+	// Bỏ clientAddr khỏi return string
 	return fmt.Sprintf("%s %d %d", question, ctx.q.Id, ctx.id)
+	// return fmt.Sprintf("%s %d %d %s", question, ctx.q.Id, ctx.id, clientAddr)  // <-- Dòng cũ
 }
 
 // Q returns the query msg. It always returns a non-nil msg.
