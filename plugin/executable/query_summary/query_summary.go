@@ -83,7 +83,7 @@ func (l *logger) Exec(ctx context.Context, qCtx *C.Context, next executable_seq.
 
 	inboundInfo := []zap.Field{
 		zap.Uint32("uqid", qCtx.Id()),
-		zap.Stringer("client", qCtx.ReqMeta().GetClientAddr()),
+	#	zap.Stringer("client", qCtx.ReqMeta().GetClientAddr()),
 		zap.String("protocol", qCtx.ReqMeta().GetProtocol()),
 	}
 	switch qCtx.ReqMeta().GetProtocol() {
