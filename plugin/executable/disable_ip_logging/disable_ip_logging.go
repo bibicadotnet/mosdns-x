@@ -23,9 +23,9 @@ import (
 	"context"
 	"net/netip"
 
-	"github.com/bibicadotnet/mosdns-x/coremain"
-	"github.com/bibicadotnet/mosdns-x/pkg/executable_seq"
-	"github.com/bibicadotnet/mosdns-x/pkg/query_context"
+	"github.com/pmkol/mosdns-x/coremain"
+	"github.com/pmkol/mosdns-x/pkg/executable_seq"
+	"github.com/pmkol/mosdns-x/pkg/query_context"
 )
 
 const PluginType = "disable_ip_logging"
