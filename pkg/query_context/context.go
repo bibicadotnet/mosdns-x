@@ -138,7 +138,7 @@ func NewContext(q *dns.Msg, meta *RequestMeta) *Context {
 // String returns a short summery of its query.
 func (ctx *Context) String() string {
 	var question string
-	var clientAddr string
+	// var clientAddr string
 
 	if len(ctx.q.Question) >= 1 {
 		q := ctx.q.Question[0]
@@ -146,13 +146,16 @@ func (ctx *Context) String() string {
 	} else {
 		question = "empty question"
 	}
+
+	/*
 	if ctx.reqMeta.clientAddr.IsValid() {
 		clientAddr = ctx.reqMeta.clientAddr.String()
 	} else {
 		clientAddr = "unknown client"
 	}
+	*/
 
-	return fmt.Sprintf("%s %d %d %s", question, ctx.q.Id, ctx.id, clientAddr)
+	return fmt.Sprintf("%s %d %d", question, ctx.q.Id, ctx.id)
 }
 
 // Q returns the query msg. It always returns a non-nil msg.
