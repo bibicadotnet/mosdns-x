@@ -43,6 +43,5 @@ jobs:
           name: Mosdns-x ${{ env.TAG_NAME }}
           tag_name: ${{ env.TAG_NAME }}
           files: './release/mosdns*.zip'
-          prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
