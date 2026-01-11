@@ -1,30 +1,46 @@
-## Mosdns-x
+## Mosdns-x PR (Privacy & Resilience)
 
-Mosdns-x 是一个用 Go 编写的高性能 DNS 转发器，支持运行插件流水线，用户可以按需定制 DNS 处理逻辑。
+Mosdns-x is a high-performance DNS forwarder written in Go. It features a plugin pipeline architecture, allowing users to customize DNS processing logic for any specific use case.
 
-**支持监听与请求以下类型的 DNS：**
+This version is a fork based on [pmkol/mosdns-x](https://github.com/pmkol/mosdns-x), focusing on privacy enhancements and connection resilience.
 
-* UDP
-* TCP
-* DNS over TLS - DoT
-* DNS over QUIC - DoQ
-* DNS over HTTP/2 - DoH
-* DNS over HTTP/3 - DoH3
+**Supported Protocols (Inbound & Outbound):**
 
-功能概述、配置方式、教程，详见：[wiki](https://github.com/pmkol/mosdns-x/wiki)
+* UDP and TCP
+* DNS over TLS (DoT)
+* DNS over QUIC (DoQ)
+* DNS over HTTP/2 (DoH)
+* DNS over HTTP/3 (DoH3)
 
-下载预编译文件、更新日志，详见：[release](https://github.com/pmkol/mosdns-x/releases)
+For features, configuration guides, and tutorials, visit the [Wiki](https://github.com/pmkol/mosdns-x/wiki).
 
-#### 电报社区：
+---
 
-**[Mosdns-x Group](https://t.me/mosdns)**
+### New Features and Enhancements
 
-#### 关联项目：
+**Resilience (Connection & Performance)**
 
-**[easymosdns](https://github.com/pmkol/easymosdns)**
+* Improved reconnection speed after server restarts for all encrypted DNS protocols.
+* **DoH3/DoQ:** Reconnection time reduced from 3-5 seconds to under 100ms.
+* **DoH/DoT:** Reconnection time reduced from 500-700ms to 200-300ms.
+* Persistent session keys stored in `key/.mosdns_stateless_reset.key` enable 0-RTT and TLS Session Resumption across restarts.
+* Added a `/health` endpoint for lightweight uptime monitoring.
 
-适用于 Linux 的辅助脚本。借助 Mosdns-x，仅需几分钟即可搭建一台支持 ECS 的无污染 DNS 服务器。内置中国大陆地区的优化规则，满足DNS日常使用场景，开箱即用。
+**Privacy and Security**
 
-**[mosdns-v4](https://github.com/IrineSistiana/mosdns/tree/v4)**
+* Disabled client IP logging to ensure user anonymity, even when logs are active.
+* Added `allowed_sni` validation to filter unauthorized scanners and bots during the TLS handshake. Blocked requests are excluded from logs.
+* Automated redirection of non-DNS traffic (any path other than `/dns-query`) to a custom landing page.
+* DNS responses limited to a maximum of 2 IP addresses per query to reduce payload overhead.
 
-一个插件化的 DNS 转发器。是 Mosdns-x 的上游项目。
+---
+
+### Community and Resources
+
+* **Telegram:** [Mosdns-x Group](https://t.me/mosdns)
+
+### Related Projects
+
+* **[pmkol/mosdns-x](https://github.com/pmkol/mosdns-x):** The base project for this high-performance DNS forwarder.
+* **[easymosdns](https://github.com/pmkol/easymosdns):** A Linux helper script to deploy ECS-supported, clean DNS servers quickly.
+* **[mosdns-v4](https://github.com/IrineSistiana/mosdns/tree/v4):** The upstream project providing the modular plugin-based forwarder architecture.
