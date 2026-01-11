@@ -20,15 +20,56 @@
 package server
 
 import (
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
+	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/quic-go/quic-go"
 	eTLS "gitlab.com/go-extension/tls"
 )
+
+var statelessResetKey []byte
+
+func init() {
+	var err error
+	statelessResetKey, err = loadOrCreateKey()
+	if err != nil {
+		log.Printf("[WARN] Failed to load stateless reset key: %v, using ephemeral key", err)
+		statelessResetKey = make([]byte, 32)
+		rand.Read(statelessResetKey)
+	}
+}
+
+func loadOrCreateKey() ([]byte, error) {
+	execPath, _ := os.Executable()
+	keyFile := filepath.Join(filepath.Dir(execPath), ".mosdns_stateless_reset.key")
+	
+	// Try read existing key
+	if data, err := os.ReadFile(keyFile); err == nil && len(data) == 32 {
+		log.Printf("[INFO] Loaded stateless reset key from: %s", keyFile)
+		return data, nil
+	}
+	
+	// Create new random key
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+	
+	// Save to file
+	if err := os.WriteFile(keyFile, key, 0600); err != nil {
+		return nil, err
+	}
+	
+	log.Printf("[INFO] Created new stateless reset key: %s", keyFile)
+	return key, nil
+}
 
 type cert[T tls.Certificate | eTLS.Certificate] struct {
 	c *T
@@ -94,13 +135,13 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 	return quic.ListenEarly(conn, &tls.Config{
 		NextProtos: nextProtos,
 		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
-            // 增加 SNI 校验逻辑
 			if allowedSNI != "" && chi.ServerName != allowedSNI {
 				return nil, errors.New("invalid sni")
 			}
 			return c.c, nil
 		},
 	}, &quic.Config{
+		StatelessResetKey:              statelessResetKey,
 		Allow0RTT:                      true,
 		InitialStreamReceiveWindow:     1252,
 		MaxStreamReceiveWindow:         4 * 1024,
@@ -125,10 +166,9 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 		NextProtos:     nextProtos,
 		Defaults: eTLS.Defaults{
 			AllSecureCipherSuites: true,
-			AllSecureCurves: true,
+			AllSecureCurves:       true,
 		},
 		GetCertificate: func(chi *eTLS.ClientHelloInfo) (*eTLS.Certificate, error) {
-			// 增加 SNI 校验逻辑
 			if allowedSNI != "" && chi.ServerName != allowedSNI {
 				return nil, errors.New("invalid sni")
 			}
