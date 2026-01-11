@@ -34,15 +34,19 @@ import (
 	eTLS "gitlab.com/go-extension/tls"
 )
 
-var statelessResetKey []byte
+var statelessResetKey *quic.StatelessResetKey
 
 func init() {
-	var err error
-	statelessResetKey, err = loadOrCreateKey()
+	key, err := loadOrCreateKey()
 	if err != nil {
 		log.Printf("[WARN] Failed to load stateless reset key: %v, using ephemeral key", err)
-		statelessResetKey = make([]byte, 32)
-		rand.Read(statelessResetKey)
+		var tmpKey quic.StatelessResetKey
+		rand.Read(tmpKey[:])
+		statelessResetKey = &tmpKey
+	} else {
+		var resetKey quic.StatelessResetKey
+		copy(resetKey[:], key)
+		statelessResetKey = &resetKey
 	}
 }
 
@@ -50,19 +54,16 @@ func loadOrCreateKey() ([]byte, error) {
 	execPath, _ := os.Executable()
 	keyFile := filepath.Join(filepath.Dir(execPath), ".mosdns_stateless_reset.key")
 	
-	// Try read existing key
 	if data, err := os.ReadFile(keyFile); err == nil && len(data) == 32 {
 		log.Printf("[INFO] Loaded stateless reset key from: %s", keyFile)
 		return data, nil
 	}
 	
-	// Create new random key
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		return nil, err
 	}
 	
-	// Save to file
 	if err := os.WriteFile(keyFile, key, 0600); err != nil {
 		return nil, err
 	}
