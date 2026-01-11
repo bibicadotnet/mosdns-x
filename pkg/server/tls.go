@@ -35,6 +35,7 @@ import (
 )
 
 var statelessResetKey *quic.StatelessResetKey
+var tlsSessionTicketKey [32]byte
 
 func init() {
 	key, err := loadOrCreateKey()
@@ -43,10 +44,12 @@ func init() {
 		var tmpKey quic.StatelessResetKey
 		rand.Read(tmpKey[:])
 		statelessResetKey = &tmpKey
+		rand.Read(tlsSessionTicketKey[:])
 	} else {
 		var resetKey quic.StatelessResetKey
 		copy(resetKey[:], key)
 		statelessResetKey = &resetKey
+		copy(tlsSessionTicketKey[:], key)
 	}
 }
 
@@ -138,14 +141,14 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 		return nil, err
 	}
 	
-	// Create Transport with StatelessResetKey
 	tr := &quic.Transport{
 		Conn:              conn,
 		StatelessResetKey: statelessResetKey,
 	}
 	
 	return tr.ListenEarly(&tls.Config{
-		NextProtos: nextProtos,
+		NextProtos:       nextProtos,
+		SessionTicketKey: tlsSessionTicketKey,
 		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			if allowedSNI != "" && chi.ServerName != allowedSNI {
 				return nil, errors.New("invalid sni")
@@ -170,11 +173,12 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 		return nil, err
 	}
 	return eTLS.NewListener(l, &eTLS.Config{
-		KernelTX:       s.opts.KernelTX,
-		KernelRX:       s.opts.KernelRX,
-		AllowEarlyData: true,
-		MaxEarlyData:   4096,
-		NextProtos:     nextProtos,
+		SessionTicketKey: tlsSessionTicketKey,
+		KernelTX:         s.opts.KernelTX,
+		KernelRX:         s.opts.KernelRX,
+		AllowEarlyData:   true,
+		MaxEarlyData:     4096,
+		NextProtos:       nextProtos,
 		Defaults: eTLS.Defaults{
 			AllSecureCipherSuites: true,
 			AllSecureCurves:       true,
