@@ -1,6 +1,6 @@
 module github.com/pmkol/mosdns-x
 
-go 1.25.6
+go 1.25.5
 
 require (
 	github.com/Knetic/govaluate v3.0.0+incompatible
@@ -19,8 +19,8 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
-	gitlab.com/go-extension/http v0.0.0-20251006175957-3113a1e48242
-	gitlab.com/go-extension/tls v0.0.0-20251218095625-a161feb36b6b
+	gitlab.com/go-extension/http v0.0.0-20260118113043-f91863355c61
+	gitlab.com/go-extension/tls v0.0.0-20260118112212-e13d5f5eea8d
 	go.uber.org/zap v1.27.1
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96
