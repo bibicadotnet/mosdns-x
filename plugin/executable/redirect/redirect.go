@@ -101,30 +101,34 @@ func (r *redirectPlugin) Exec(ctx context.Context, qCtx *query_context.Context, 
 		return executable_seq.ExecChainNode(ctx, qCtx, next)
 	}
 
+	// Change query name to the redirect target
 	q.Question[0].Name = redirectTarget
 	err := executable_seq.ExecChainNode(ctx, qCtx, next)
-	if r := qCtx.R(); r != nil {
-		// Restore original query name.
-		for i := range r.Question {
-			if r.Question[i].Name == redirectTarget {
-				r.Question[i].Name = orgQName
+
+	if resp := qCtx.R(); resp != nil {
+		// 1. Restore the original query name in the Question section
+		for i := range resp.Question {
+			if resp.Question[i].Name == redirectTarget {
+				resp.Question[i].Name = orgQName
 			}
 		}
 
-		// Insert a CNAME record.
-		newAns := make([]dns.RR, 1, len(r.Answer)+1)
-		newAns[0] = &dns.CNAME{
-			Hdr: dns.RR_Header{
-				Name:   orgQName,
-				Rrtype: dns.TypeCNAME,
-				Class:  dns.ClassINET,
-				Ttl:    1,
-			},
-			Target: redirectTarget,
+		// 2. Filter out CNAMEs and rewrite Answer record names to the original name
+		filteredAns := make([]dns.RR, 0, len(resp.Answer))
+		for _, rr := range resp.Answer {
+			// Skip CNAME records to avoid protocol conflicts and keep the result clean
+			if rr.Header().Rrtype == dns.TypeCNAME {
+				continue
+			}
+			// Rewrite the record name (A/AAAA) to match the original query
+			if rr.Header().Name == redirectTarget {
+				rr.Header().Name = orgQName
+			}
+			filteredAns = append(filteredAns, rr)
 		}
-		newAns = append(newAns, r.Answer...)
-		r.Answer = newAns
+		resp.Answer = filteredAns
 	}
+
 	return err
 }
 
