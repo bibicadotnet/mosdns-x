@@ -90,42 +90,37 @@ func newRedirect(bp *coremain.BP, args *Args) (*redirectPlugin, error) {
 }
 
 func (r *redirectPlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
-	q := qCtx.Q()
-	if len(q.Question) != 1 || q.Question[0].Qclass != dns.ClassINET {
-		return executable_seq.ExecChainNode(ctx, qCtx, next)
-	}
-
-	orgQName := q.Question[0].Name
-	redirectTarget, ok := r.m.Match(orgQName)
-	if !ok {
-		return executable_seq.ExecChainNode(ctx, qCtx, next)
-	}
-
-	q.Question[0].Name = redirectTarget
-	err := executable_seq.ExecChainNode(ctx, qCtx, next)
-	if r := qCtx.R(); r != nil {
-		// Restore original query name.
-		for i := range r.Question {
-			if r.Question[i].Name == redirectTarget {
-				r.Question[i].Name = orgQName
-			}
-		}
-
-		// Insert a CNAME record.
-		newAns := make([]dns.RR, 1, len(r.Answer)+1)
-		newAns[0] = &dns.CNAME{
-			Hdr: dns.RR_Header{
-				Name:   orgQName,
-				Rrtype: dns.TypeCNAME,
-				Class:  dns.ClassINET,
-				Ttl:    1,
-			},
-			Target: redirectTarget,
-		}
-		newAns = append(newAns, r.Answer...)
-		r.Answer = newAns
-	}
-	return err
+    q := qCtx.Q()
+    if len(q.Question) != 1 || q.Question[0].Qclass != dns.ClassINET {
+        return executable_seq.ExecChainNode(ctx, qCtx, next)
+    }
+    
+    orgQName := q.Question[0].Name
+    redirectTarget, ok := r.m.Match(orgQName)
+    if !ok {
+        return executable_seq.ExecChainNode(ctx, qCtx, next)
+    }
+    
+    q.Question[0].Name = redirectTarget
+    err := executable_seq.ExecChainNode(ctx, qCtx, next)
+    
+    if resp := qCtx.R(); resp != nil {
+        // Restore original query name in Question
+        for i := range resp.Question {
+            if resp.Question[i].Name == redirectTarget {
+                resp.Question[i].Name = orgQName
+            }
+        }
+        
+        // Change Answer record names back to orgQName (NO CNAME insertion)
+        for i := range resp.Answer {
+            if resp.Answer[i].Header().Name == redirectTarget {
+                resp.Answer[i].Header().Name = orgQName
+            }
+        }
+    }
+    
+    return err
 }
 
 func (r *redirectPlugin) Close() error {
