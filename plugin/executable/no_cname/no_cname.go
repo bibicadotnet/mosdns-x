@@ -23,6 +23,7 @@ import (
 	"context"
 
 	"github.com/miekg/dns"
+
 	"github.com/pmkol/mosdns-x/coremain"
 	"github.com/pmkol/mosdns-x/pkg/executable_seq"
 	"github.com/pmkol/mosdns-x/pkg/query_context"
@@ -33,7 +34,7 @@ const (
 )
 
 func init() {
-	coremain.RegNewPersetPluginFunc("_" + PluginType, func(bp *coremain.BP) (coremain.Plugin, error) {
+	coremain.RegNewPersetPluginFunc("_no_cname", func(bp *coremain.BP) (coremain.Plugin, error) {
 		return &noCNAME{BP: bp}, nil
 	})
 }
@@ -44,12 +45,11 @@ type noCNAME struct {
 	*coremain.BP
 }
 
-func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
-	q := qCtx.Q()
-	if q == nil || len(q.Question) == 0 {
-		return executable_seq.ExecChainNode(ctx, qCtx, next)
-	}
-	originalName := q.Question[0].Name
+func (t *noCNAME) Exec(
+	ctx context.Context,
+	qCtx *query_context.Context,
+	next executable_seq.ExecutableChainNode,
+) error {
 
 	if err := executable_seq.ExecChainNode(ctx, qCtx, next); err != nil {
 		return err
@@ -59,6 +59,12 @@ func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next ex
 	if r == nil || len(r.Answer) == 0 {
 		return nil
 	}
+
+	q := qCtx.Q()
+	if q == nil || len(q.Question) == 0 {
+		return nil
+	}
+	qName := q.Question[0].Name
 
 	hasIP := false
 	for _, rr := range r.Answer {
@@ -74,15 +80,14 @@ func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next ex
 		return nil
 	}
 
-	filtered := make([]dns.RR, 0, len(r.Answer))
+	filtered := r.Answer[:0]
+
 	for _, rr := range r.Answer {
 		if rr.Header().Rrtype == dns.TypeCNAME {
 			continue
 		}
-		
-		newRR := dns.Copy(rr)
-		newRR.Header().Name = originalName
-		filtered = append(filtered, newRR)
+		rr.Header().Name = qName
+		filtered = append(filtered, rr)
 	}
 
 	r.Answer = filtered
