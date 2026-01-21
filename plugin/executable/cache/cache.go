@@ -296,7 +296,10 @@ func (c *cachePlugin) doLazyUpdate(msgKey string, qCtx *query_context.Context, n
 
 // tryStoreMsg tries to store r to cache. If r should be cached.
 func (c *cachePlugin) tryStoreMsg(key string, r *dns.Msg) error {
-	if r.Rcode != dns.RcodeSuccess || r.Truncated != false {
+	if r.Truncated {
+		return nil
+	}
+	if r.Rcode != dns.RcodeSuccess && r.Rcode != dns.RcodeNameError {
 		return nil
 	}
 
