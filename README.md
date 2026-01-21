@@ -25,6 +25,7 @@ For features, configuration guides, and tutorials, visit the [Wiki](https://gith
 * **DoH/DoT:** Reconnection time reduced from 500-700ms to 200-300ms.
 * Persistent session keys stored in `key/.mosdns_stateless_reset.key` enable 0-RTT and TLS Session Resumption across restarts.
 * Added a `/health` endpoint for lightweight uptime monitoring.
+* Added `NXDOMAIN` (non-existent domain) caching support.
 
 **Privacy and Security**
 
