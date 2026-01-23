@@ -50,6 +50,23 @@ var nopLogger = zap.NewNop()
 
 var ErrAllFailed = errors.New("all upstreams failed")
 
+// getRcodePriority returns priority for non-success DNS response codes.
+// Lower score = higher priority.
+// Note: RcodeSuccess (0) is handled separately and returns immediately,
+// so it doesn't need a priority score here.
+func getRcodePriority(rcode int) int {
+	switch rcode {
+	case dns.RcodeNameError:
+		return 1 // NXDOMAIN - definitive "not exist"
+	case dns.RcodeServerFailure:
+		return 2 // SERVFAIL - temporary issue
+	case dns.RcodeRefused:
+		return 3 // REFUSED - policy block
+	default:
+		return 4 // Other errors
+	}
+}
+
 func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstreams []Upstream, logger *zap.Logger) (*dns.Msg, error) {
 	if logger == nil {
 		logger = nopLogger
@@ -74,7 +91,6 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 	for _, u := range upstreams {
 		u := u
 		qCopy := q.Copy()
-
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -95,7 +111,6 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 	var lastRes *dns.Msg
 	var lastErr error
 
-	// Idiomatic way to consume the channel until it's closed by the waiter goroutine
 	for res := range c {
 		if res.err != nil {
 			// Suppress logging for context cancellation as it is an expected behavior
@@ -113,24 +128,24 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 			continue
 		}
 
-		// Priority 1: Trusted upstream or Successful Rcode (0)
+		// Priority 1: Trusted upstream or Successful Rcode (0) - Return immediately
 		if res.from.Trusted() || res.r.Rcode == dns.RcodeSuccess {
 			cancel()
 			return res.r, nil
 		}
 
-		// Priority 2: Prefer NXDOMAIN (NameError) over other Rcode errors
-		if lastRes == nil || (res.r.Rcode == dns.RcodeNameError && lastRes.Rcode != dns.RcodeNameError) {
+		// Priority 2: Deterministic Hierarchy for error responses (e.g., NXDOMAIN > SERVFAIL)
+		if lastRes == nil || getRcodePriority(res.r.Rcode) < getRcodePriority(lastRes.Rcode) {
 			lastRes = res.r
 		}
 	}
 
-	// Fallback to the best non-success response found (e.g., NXDOMAIN)
+	// Fallback to the best available error response found during the parallel execution
 	if lastRes != nil {
 		return lastRes, nil
 	}
 
-	// If everything failed, return the last meaningful error
+	// Return the last network error if no valid DNS responses were received
 	if lastErr != nil && !errors.Is(lastErr, context.Canceled) {
 		return nil, lastErr
 	}
