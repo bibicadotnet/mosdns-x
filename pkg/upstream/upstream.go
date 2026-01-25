@@ -243,7 +243,9 @@ func NewUpstream(addr string, opt *Opt) (Upstream, error) {
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return d.DialContext(ctx, "tcp", dialAddr)
 			},
-			IdleConnTimeout: idleConnTimeout,
+			ResponseHeaderTimeout: 10 * time.Second,
+			ExpectContinueTimeout: time.Second,
+			IdleConnTimeout:       idleConnTimeout,
 		}), nil
 	case "https", "h2", "doh":
 		idleConnTimeout := time.Second * 30
@@ -266,8 +268,11 @@ func NewUpstream(addr string, opt *Opt) (Upstream, error) {
 				}
 				return tlsConn, nil
 			},
-			IdleConnTimeout:   idleConnTimeout,
-			ForceAttemptHTTP2: true,
+			TLSHandshakeTimeout:   5 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Second,
+			ExpectContinueTimeout: time.Second,
+			IdleConnTimeout:       idleConnTimeout,
+			ForceAttemptHTTP2:     true,
 		}), nil
 	case "h3", "doh3":
 		idleConnTimeout := time.Second * 30
