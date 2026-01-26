@@ -12,9 +12,6 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 package server
@@ -34,21 +31,15 @@ const (
 	// TLS handshake + HTTP headers (Slowloris protection)
 	defaultReadHeaderTimeout = 3 * time.Second
 
-	// IMPORTANT: protect against slow-read attacks (body + handler)
+	// CRITICAL: protect against slow-read attacks (body + handler)
 	defaultReadTimeout = 10 * time.Second
 
 	// Response write timeout
 	defaultWriteTimeout = 10 * time.Second
 
-	// DoH GET headers can be >2KB (base64url + proxy headers)
-	defaultMaxHeaderBytes = 4096
-
-	// Max DNS message over DoH (RFC 8484)
-	maxDoHBodySize = 8192
+	// 2KB is sufficient for DoH (GET base64 + normal headers)
+	defaultMaxHeaderBytes = 2048
 )
-
-// Limit concurrent DoH requests (VPS-friendly)
-var dohSemaphore = make(chan struct{}, 512)
 
 func (s *Server) ServeHTTP(l net.Listener) error {
 	defer l.Close()
@@ -88,20 +79,6 @@ type eHandler struct {
 }
 
 func (h *eHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Concurrency limit (OOM / goroutine protection)
-	select {
-	case dohSemaphore <- struct{}{}:
-		defer func() { <-dohSemaphore }()
-	default:
-		http.Error(w, "Server Busy", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Limit POST body size (DoH RFC)
-	if r.Method == http.MethodPost {
-		r.Body = http.MaxBytesReader(w, r.Body, maxDoHBodySize)
-	}
-
 	h.h.ServeHTTP(&eWriter{w}, &eRequest{r})
 }
 
