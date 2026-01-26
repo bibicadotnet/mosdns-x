@@ -31,21 +31,24 @@ import (
 )
 
 const (
-	// Protect against Slowloris (TLS handshake + headers)
-	defaultReadHeaderTimeout = 2 * time.Second
+	// TLS handshake + HTTP headers (Slowloris protection)
+	defaultReadHeaderTimeout = 3 * time.Second
 
-	// Time allowed to write response
-	defaultWriteTimeout = 8 * time.Second
+	// IMPORTANT: protect against slow-read attacks (body + handler)
+	defaultReadTimeout = 10 * time.Second
 
-	// Allow larger headers for DoH GET (base64url)
-	defaultMaxHeaderBytes = 2048
+	// Response write timeout
+	defaultWriteTimeout = 10 * time.Second
 
-	// Max DNS message size over DoH (RFC 8484 + EDNS0)
-	maxDoHBodySize = 64 * 1024
+	// DoH GET headers can be >2KB (base64url + proxy headers)
+	defaultMaxHeaderBytes = 4096
+
+	// Max DNS message over DoH (RFC 8484)
+	maxDoHBodySize = 8192
 )
 
-// Limit concurrent DoH requests to prevent CPU / goroutine exhaustion
-var dohSemaphore = make(chan struct{}, 4096)
+// Limit concurrent DoH requests (VPS-friendly)
+var dohSemaphore = make(chan struct{}, 512)
 
 func (s *Server) ServeHTTP(l net.Listener) error {
 	defer l.Close()
@@ -60,9 +63,9 @@ func (s *Server) ServeHTTP(l net.Listener) error {
 	}
 
 	hs := &http.Server{
-		Handler: &eHandler{s.opts.HttpHandler},
-
+		Handler:           &eHandler{s.opts.HttpHandler},
 		ReadHeaderTimeout: defaultReadHeaderTimeout,
+		ReadTimeout:       defaultReadTimeout,
 		WriteTimeout:      defaultWriteTimeout,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    defaultMaxHeaderBytes,
@@ -85,7 +88,7 @@ type eHandler struct {
 }
 
 func (h *eHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Limit concurrent DoH requests
+	// Concurrency limit (OOM / goroutine protection)
 	select {
 	case dohSemaphore <- struct{}{}:
 		defer func() { <-dohSemaphore }()
@@ -94,7 +97,7 @@ func (h *eHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Limit POST body size for DoH (proper HTTP-level protection)
+	// Limit POST body size (DoH RFC)
 	if r.Method == http.MethodPost {
 		r.Body = http.MaxBytesReader(w, r.Body, maxDoHBodySize)
 	}
@@ -122,7 +125,6 @@ func (r *eRequest) TLS() *H.TlsInfo {
 }
 
 func (r *eRequest) Body() io.ReadCloser {
-	// Body already limited at HTTP layer
 	return r.r.Body
 }
 
