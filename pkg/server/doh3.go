@@ -32,7 +32,17 @@ import (
 	H "github.com/pmkol/mosdns-x/pkg/server/http_handler"
 )
 
-const defaultQUICIdleTimeout = 30 * time.Second
+const (
+	defaultQUICIdleTimeout = 30 * time.Second
+
+	// DoH over HTTP/3 limits
+	maxDoHBodySize        = 64 * 1024 // RFC 8484 / EDNS0
+	maxDoH3HeaderBytes    = 4096
+	maxConcurrentDoH3Reqs = 2048
+)
+
+// Limit concurrent DoH3 requests (stream-level protection)
+var doh3Semaphore = make(chan struct{}, maxConcurrentDoH3Reqs)
 
 func (s *Server) ServeH3(l *quic.EarlyListener) error {
 	defer l.Close()
@@ -49,20 +59,19 @@ func (s *Server) ServeH3(l *quic.EarlyListener) error {
 	hs := &http3.Server{
 		Handler:        &sHandler{s.opts.HttpHandler},
 		IdleTimeout:    idleTimeout,
-		MaxHeaderBytes: 2048,
+		MaxHeaderBytes: maxDoH3HeaderBytes,
 	}
+
 	if ok := s.trackCloser(hs, true); !ok {
 		return ErrServerClosed
 	}
 	defer s.trackCloser(hs, false)
 
 	err := hs.ServeListener(l)
-	if err == http.ErrServerClosed { // Replace http.ErrServerClosed with our ErrServerClosed
+	if err == http.ErrServerClosed {
 		return ErrServerClosed
-	} else if err != nil {
-		return err
 	}
-	return nil
+	return err
 }
 
 type sHandler struct {
@@ -70,6 +79,20 @@ type sHandler struct {
 }
 
 func (h *sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 1. Limit concurrent DoH3 requests
+	select {
+	case doh3Semaphore <- struct{}{}:
+		defer func() { <-doh3Semaphore }()
+	default:
+		http.Error(w, "Server Busy", http.StatusTooManyRequests)
+		return
+	}
+
+	// 2. Limit POST body size (HTTP-level protection)
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, maxDoHBodySize)
+	}
+
 	h.h.ServeHTTP(&sWriter{w}, &sRequest{r})
 }
 
@@ -84,16 +107,16 @@ func (r *sRequest) URL() *url.URL {
 func (r *sRequest) TLS() *H.TlsInfo {
 	if r.r.TLS == nil {
 		return nil
-	} else {
-		return &H.TlsInfo{
-			Version:            r.r.TLS.Version,
-			ServerName:         r.r.TLS.ServerName,
-			NegotiatedProtocol: r.r.TLS.NegotiatedProtocol,
-		}
+	}
+	return &H.TlsInfo{
+		Version:            r.r.TLS.Version,
+		ServerName:         r.r.TLS.ServerName,
+		NegotiatedProtocol: r.r.TLS.NegotiatedProtocol,
 	}
 }
 
 func (r *sRequest) Body() io.ReadCloser {
+	// Body already limited at HTTP layer
 	return r.r.Body
 }
 
