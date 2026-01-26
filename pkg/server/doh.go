@@ -31,65 +31,50 @@ import (
 )
 
 const (
-	// Timeout for reading request headers (TLS handshake + HTTP headers)
-	defaultReadHeaderTimeout = 3 * time.Second
-	
-	// Timeout for reading entire request (headers + body + handler processing)
-	// Should be larger than DNS handler timeout (5s) to allow proper handling
-	defaultReadTimeout = 10 * time.Second
-	
-	// Timeout for writing response to client
-	defaultWriteTimeout = 10 * time.Second
-	
-	// Maximum size of request headers (2KB is sufficient for DNS-over-HTTPS)
+	// Protect against Slowloris (TLS handshake + headers)
+	defaultReadHeaderTimeout = 2 * time.Second
+
+	// Time allowed to write response
+	defaultWriteTimeout = 8 * time.Second
+
+	// Allow larger headers for DoH GET (base64url)
 	defaultMaxHeaderBytes = 2048
+
+	// Max DNS message size over DoH (RFC 8484 + EDNS0)
+	maxDoHBodySize = 64 * 1024
 )
+
+// Limit concurrent DoH requests to prevent CPU / goroutine exhaustion
+var dohSemaphore = make(chan struct{}, 4096)
 
 func (s *Server) ServeHTTP(l net.Listener) error {
 	defer l.Close()
-	
+
 	if s.opts.HttpHandler == nil {
 		return errMissingHTTPHandler
 	}
-	
-	// IdleTimeout is for keep-alive connections between requests
+
 	idleTimeout := s.opts.IdleTimeout
 	if idleTimeout == 0 {
 		idleTimeout = defaultTCPIdleTimeout
 	}
-	
+
 	hs := &http.Server{
 		Handler: &eHandler{s.opts.HttpHandler},
-		
-		// ReadHeaderTimeout: Time to read request headers
-		// Must account for TLS handshake (~200-500ms) + header parsing
+
 		ReadHeaderTimeout: defaultReadHeaderTimeout,
-		
-		// ReadTimeout: Total time to read request and process handler
-		// Must be > DNS handler timeout (5s) to prevent premature timeouts
-		ReadTimeout: defaultReadTimeout,
-		
-		// WriteTimeout: Time to write response to client
-		// Protects against slow clients and ensures resources are freed
-		WriteTimeout: defaultWriteTimeout,
-		
-		// IdleTimeout: Time to keep connection alive between requests (keep-alive)
-		// Can be much longer as connection is idle, not processing
-		IdleTimeout: idleTimeout,
-		
-		// MaxHeaderBytes: Maximum size of request headers
-		// 2KB is sufficient for DNS-over-HTTPS
-		MaxHeaderBytes: defaultMaxHeaderBytes,
+		WriteTimeout:      defaultWriteTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    defaultMaxHeaderBytes,
 	}
-	
+
 	if ok := s.trackCloser(hs, true); !ok {
 		return ErrServerClosed
 	}
 	defer s.trackCloser(hs, false)
-	
+
 	err := hs.Serve(l)
 	if err == http.ErrServerClosed {
-		// Replace http.ErrServerClosed with our ErrServerClosed
 		return ErrServerClosed
 	}
 	return err
@@ -100,6 +85,20 @@ type eHandler struct {
 }
 
 func (h *eHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Limit concurrent DoH requests
+	select {
+	case dohSemaphore <- struct{}{}:
+		defer func() { <-dohSemaphore }()
+	default:
+		http.Error(w, "Server Busy", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Limit POST body size for DoH (proper HTTP-level protection)
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, maxDoHBodySize)
+	}
+
 	h.h.ServeHTTP(&eWriter{w}, &eRequest{r})
 }
 
@@ -123,6 +122,7 @@ func (r *eRequest) TLS() *H.TlsInfo {
 }
 
 func (r *eRequest) Body() io.ReadCloser {
+	// Body already limited at HTTP layer
 	return r.r.Body
 }
 
