@@ -173,7 +173,7 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 	}
 	if lazyHit {
 		c.lazyHitTotal.Inc()
-		c.doLazyUpdate(msgKey, qCtx, next)
+		c.doLazyUpdate(ctx, msgKey, qCtx, next)
 	}
 	if cachedResp != nil { // cache hit
 		c.hitTotal.Inc()
@@ -281,12 +281,12 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 
 // doLazyUpdate starts a new goroutine to execute next node and update the cache in the background.
 // It has an inner singleflight.Group to de-duplicate same msgKey.
-func (c *cachePlugin) doLazyUpdate(msgKey string, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
+func (c *cachePlugin) doLazyUpdate(originalCtx context.Context, msgKey string, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
 	lazyQCtx := qCtx.Copy()
 	lazyUpdateFunc := func() (interface{}, error) {
 		c.L().Debug("start lazy cache update", lazyQCtx.InfoField())
 		defer c.lazyUpdateSF.Forget(msgKey)
-		baseCtx, cancel := context.WithTimeout(context.Background(), defaultLazyUpdateTimeout)
+		baseCtx, cancel := context.WithTimeout(originalCtx, defaultLazyUpdateTimeout)
 		defer cancel()
 
 		lazyCtx := context.WithValue(baseCtx, "mosdns_is_bg_update", true)
