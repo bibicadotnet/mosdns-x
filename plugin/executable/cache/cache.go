@@ -258,7 +258,6 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 			if err != nil {
 				return nil, false, fmt.Errorf("snappy decode err: %w", err)
 			}
-			// Clone decoded data before pool buffer is released
 			v = append([]byte(nil), decoded...)
 		}
 		r = new(dns.Msg)
@@ -294,17 +293,15 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 // doLazyUpdate starts a new goroutine to execute next node and update the cache in the background.
 // It has an inner singleflight.Group to de-duplicate same msgKey.
 func (c *cachePlugin) doLazyUpdate(ctx context.Context, msgKey string, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
-	// Deep copy Q to avoid data race
 	lazyQCtx := qCtx.Copy()
 	qCopy := qCtx.Q().Copy()
-	lazyQCtx.QCtx = qCopy
+	lazyQCtx.QCtx = qCopy 
 
 	go func() {
 		_, _, _ = c.lazyUpdateSF.Do(msgKey, func() (interface{}, error) {
 			c.L().Debug("start lazy cache update", lazyQCtx.InfoField())
 			defer c.lazyUpdateSF.Forget(msgKey)
 
-			// Detach context to keep values (metadata) but ignore original cancellation
 			detached := &detachedContext{
 				Context:      context.Background(),
 				parentValues: ctx,
@@ -360,7 +357,6 @@ func (c *cachePlugin) tryStoreMsg(key string, r *dns.Msg) error {
 		compressBuf := pool.GetBuf(snappy.MaxEncodedLen(len(v)))
 		defer compressBuf.Release()
 		encoded := snappy.Encode(compressBuf.Bytes(), v)
-		// Clone encoded data before pool buffer is released
 		v = append([]byte(nil), encoded...)
 	}
 	c.backend.Store(key, v, now, expirationTime)
