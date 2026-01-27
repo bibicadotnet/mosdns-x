@@ -2,19 +2,6 @@
  * Copyright (C) 2020-2022, IrineSistiana
  *
  * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 package cache
@@ -210,11 +197,7 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 func (c *cachePlugin) getMsgKey(q *dns.Msg) (string, error) {
 	isSimpleQuery := len(q.Question) == 1 && len(q.Answer) == 0 && len(q.Ns) == 0 && len(q.Extra) == 0
 	if isSimpleQuery || c.args.CacheEverything {
-		msgKey, err := dnsutils.GetMsgKey(q, 0)
-		if err != nil {
-			return "", fmt.Errorf("failed to unpack query msg, %w", err)
-		}
-		return msgKey, nil
+		return dnsutils.GetMsgKey(q, 0)
 	}
 
 	if len(q.Question) == 1 {
@@ -223,11 +206,7 @@ func (c *cachePlugin) getMsgKey(q *dns.Msg) (string, error) {
 		simpleQ.Ns = nil
 		simpleQ.Extra = nil
 
-		msgKey, err := dnsutils.GetMsgKey(&simpleQ, 0)
-		if err != nil {
-			return "", fmt.Errorf("failed to unpack query msg, %w", err)
-		}
-		return msgKey, nil
+		return dnsutils.GetMsgKey(&simpleQ, 0)
 	}
 
 	return "", nil
@@ -245,13 +224,18 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 			if decodeLen > dns.MaxMsgSize {
 				return nil, false, fmt.Errorf("invalid snappy data, not a dns msg, data len: %d", decodeLen)
 			}
-			decompressBuf := pool.GetBuf(decodeLen)
-			defer decompressBuf.Release()
-			decoded, err := snappy.Decode(decompressBuf.Bytes(), v)
-			if err != nil {
-				return nil, false, fmt.Errorf("snappy decode err: %w", err)
+			
+			// Scope decompressBuf for manual release
+			{
+				decompressBuf := pool.GetBuf(decodeLen)
+				decoded, err := snappy.Decode(decompressBuf.Bytes(), v)
+				if err != nil {
+					decompressBuf.Release()
+					return nil, false, fmt.Errorf("snappy decode err: %w", err)
+				}
+				v = append([]byte(nil), decoded...)
+				decompressBuf.Release() // Release as soon as data is cloned
 			}
-			v = append([]byte(nil), decoded...)
 		}
 		r = new(dns.Msg)
 		if err := r.Unpack(v); err != nil {
@@ -280,7 +264,6 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 }
 
 func (c *cachePlugin) doLazyUpdate(ctx context.Context, msgKey string, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
-	// Q is already deep copied by qCtx.Copy()
 	lazyQCtx := qCtx.Copy()
 
 	go func() {
@@ -338,11 +321,15 @@ func (c *cachePlugin) tryStoreMsg(key string, r *dns.Msg) error {
 		}
 		expirationTime = now.Add(time.Duration(minTTL) * time.Second)
 	}
+
 	if c.args.CompressResp {
-		compressBuf := pool.GetBuf(snappy.MaxEncodedLen(len(v)))
-		defer compressBuf.Release()
-		encoded := snappy.Encode(compressBuf.Bytes(), v)
-		v = append([]byte(nil), encoded...)
+		// Scope compressBuf for manual release
+		{
+			compressBuf := pool.GetBuf(snappy.MaxEncodedLen(len(v)))
+			encoded := snappy.Encode(compressBuf.Bytes(), v)
+			v = append([]byte(nil), encoded...)
+			compressBuf.Release() // Release before calling c.backend.Store
+		}
 	}
 	c.backend.Store(key, v, now, expirationTime)
 	return nil
