@@ -85,6 +85,16 @@ type cachePlugin struct {
 	size         prometheus.GaugeFunc
 }
 
+// detachedContext preserves Values from parent but ignores parent's cancellation.
+type detachedContext struct {
+	context.Context
+	parentValues context.Context
+}
+
+func (d *detachedContext) Value(key interface{}) interface{} {
+	return d.parentValues.Value(key)
+}
+
 func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
 	return newCachePlugin(bp, args.(*Args))
 }
@@ -173,7 +183,7 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 	}
 	if lazyHit {
 		c.lazyHitTotal.Inc()
-		c.doLazyUpdate(msgKey, qCtx, next)
+		c.doLazyUpdate(ctx, msgKey, qCtx, next)
 	}
 	if cachedResp != nil { // cache hit
 		c.hitTotal.Inc()
@@ -244,10 +254,12 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 			}
 			decompressBuf := pool.GetBuf(decodeLen)
 			defer decompressBuf.Release()
-			v, err = snappy.Decode(decompressBuf.Bytes(), v)
+			decoded, err := snappy.Decode(decompressBuf.Bytes(), v)
 			if err != nil {
 				return nil, false, fmt.Errorf("snappy decode err: %w", err)
 			}
+			// Clone decoded data before pool buffer is released
+			v = append([]byte(nil), decoded...)
 		}
 		r = new(dns.Msg)
 		if err := r.Unpack(v); err != nil {
@@ -281,31 +293,42 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 
 // doLazyUpdate starts a new goroutine to execute next node and update the cache in the background.
 // It has an inner singleflight.Group to de-duplicate same msgKey.
-func (c *cachePlugin) doLazyUpdate(msgKey string, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
+func (c *cachePlugin) doLazyUpdate(ctx context.Context, msgKey string, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
+	// Deep copy Q to avoid data race
 	lazyQCtx := qCtx.Copy()
-	lazyUpdateFunc := func() (interface{}, error) {
-		c.L().Debug("start lazy cache update", lazyQCtx.InfoField())
-		defer c.lazyUpdateSF.Forget(msgKey)
-		baseCtx, cancel := context.WithTimeout(context.Background(), defaultLazyUpdateTimeout)
-		defer cancel()
+	qCopy := qCtx.Q().Copy()
+	lazyQCtx.QCtx = qCopy
 
-		lazyCtx := context.WithValue(baseCtx, "mosdns_is_bg_update", true)
+	go func() {
+		_, _, _ = c.lazyUpdateSF.Do(msgKey, func() (interface{}, error) {
+			c.L().Debug("start lazy cache update", lazyQCtx.InfoField())
+			defer c.lazyUpdateSF.Forget(msgKey)
 
-		err := executable_seq.ExecChainNode(lazyCtx, lazyQCtx, next)
-		if err != nil {
-			c.L().Warn("failed to update lazy cache", lazyQCtx.InfoField(), zap.Error(err))
-		}
-
-		r := lazyQCtx.R()
-		if r != nil {
-			if err := c.tryStoreMsg(msgKey, r); err != nil {
-				c.L().Error("cache store", qCtx.InfoField(), zap.Error(err))
+			// Detach context to keep values (metadata) but ignore original cancellation
+			detached := &detachedContext{
+				Context:      context.Background(),
+				parentValues: ctx,
 			}
-		}
-		c.L().Debug("lazy cache updated", lazyQCtx.InfoField())
-		return nil, nil
-	}
-	c.lazyUpdateSF.DoChan(msgKey, lazyUpdateFunc) // DoChan won't block this goroutine
+			baseCtx, cancel := context.WithTimeout(detached, defaultLazyUpdateTimeout)
+			defer cancel()
+
+			lazyCtx := context.WithValue(baseCtx, "mosdns_is_bg_update", true)
+
+			err := executable_seq.ExecChainNode(lazyCtx, lazyQCtx, next)
+			if err != nil {
+				c.L().Warn("failed to update lazy cache", lazyQCtx.InfoField(), zap.Error(err))
+			}
+
+			r := lazyQCtx.R()
+			if r != nil {
+				if err := c.tryStoreMsg(msgKey, r); err != nil {
+					c.L().Error("cache store", lazyQCtx.InfoField(), zap.Error(err))
+				}
+			}
+			c.L().Debug("lazy cache updated", lazyQCtx.InfoField())
+			return nil, nil
+		})
+	}()
 }
 
 // tryStoreMsg tries to store r to cache. If r should be cached.
@@ -335,8 +358,10 @@ func (c *cachePlugin) tryStoreMsg(key string, r *dns.Msg) error {
 	}
 	if c.args.CompressResp {
 		compressBuf := pool.GetBuf(snappy.MaxEncodedLen(len(v)))
-		v = snappy.Encode(compressBuf.Bytes(), v)
 		defer compressBuf.Release()
+		encoded := snappy.Encode(compressBuf.Bytes(), v)
+		// Clone encoded data before pool buffer is released
+		v = append([]byte(nil), encoded...)
 	}
 	c.backend.Store(key, v, now, expirationTime)
 	return nil
