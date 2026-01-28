@@ -278,7 +278,7 @@ func (c *cachePlugin) doLazyUpdate(ctx context.Context, msgKey string, qCtx *que
 			baseCtx, cancel := context.WithTimeout(detached, defaultLazyUpdateTimeout)
 			defer cancel()
 
-			lazyCtx := context.WithValue(baseCtx, "mosdns_is_bg_update", true)
+			lazyCtx := baseCtx
 
 			err := executable_seq.ExecChainNode(lazyCtx, lazyQCtx, next)
 			if err != nil {
