@@ -2,19 +2,6 @@
  * Copyright (C) 2020-2022, IrineSistiana
  *
  * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 package server
@@ -151,7 +138,7 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 		SessionTicketKey: tlsSessionTicketKey,
 		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			if allowedSNI != "" && chi.ServerName != allowedSNI {
-				return nil, errors.New("invalid sni")
+				return nil, nil
 			}
 			return c.c, nil
 		},
@@ -185,7 +172,7 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 		},
 		GetCertificate: func(chi *eTLS.ClientHelloInfo) (*eTLS.Certificate, error) {
 			if allowedSNI != "" && chi.ServerName != allowedSNI {
-				return nil, errors.New("invalid sni")
+				return nil, nil
 			}
 			return c.c, nil
 		},
