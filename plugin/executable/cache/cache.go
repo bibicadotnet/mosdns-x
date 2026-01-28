@@ -268,7 +268,6 @@ func (c *cachePlugin) doLazyUpdate(ctx context.Context, msgKey string, qCtx *que
 
 	go func() {
 		_, _, _ = c.lazyUpdateSF.Do(msgKey, func() (interface{}, error) {
-			c.L().Info("LAZY UPDATE START", lazyQCtx.InfoField())
 			defer c.lazyUpdateSF.Forget(msgKey)
 
 			detached := &detachedContext{
@@ -282,8 +281,6 @@ func (c *cachePlugin) doLazyUpdate(ctx context.Context, msgKey string, qCtx *que
 
 			if err != nil {
 				c.L().Warn("LAZY UPDATE FAILED", lazyQCtx.InfoField(), zap.Error(err))
-			} else {
-				c.L().Info("LAZY UPDATE SUCCESS", lazyQCtx.InfoField())
 			}
 
 			r := lazyQCtx.R()
