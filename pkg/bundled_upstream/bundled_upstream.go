@@ -16,6 +16,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+
 package bundled_upstream
 
 import (
@@ -112,11 +113,14 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 
 	for res := range c {
 		if res.err != nil {
-			logger.Warn("upstream failed detail",
-				qCtx.InfoField(),
-				zap.String("addr", res.from.Address()),
-				zap.Error(res.err))
-			lastErr = res.err
+			// Only log if the error is not a result of a purposeful cancellation
+			if !errors.Is(res.err, context.Canceled) {
+				logger.Warn("upstream failed detail",
+					qCtx.InfoField(),
+					zap.String("addr", res.from.Address()),
+					zap.Error(res.err))
+				lastErr = res.err
+			}
 			continue
 		}
 
@@ -126,7 +130,7 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 
 		// Priority 1: Trusted upstream or Successful Rcode (0) - Return immediately
 		if res.from.Trusted() || res.r.Rcode == dns.RcodeSuccess {
-			cancel()
+			cancel() // Terminate other pending requests
 			return res.r, nil
 		}
 
@@ -141,8 +145,8 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 		return lastRes, nil
 	}
 
-	// Return the last network error if no valid DNS responses were received
-	if lastErr != nil {
+	// Return the last network error if no valid DNS responses were received (ignoring cancel)
+	if lastErr != nil && !errors.Is(lastErr, context.Canceled) {
 		return nil, lastErr
 	}
 
