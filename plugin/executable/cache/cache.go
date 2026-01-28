@@ -268,7 +268,7 @@ func (c *cachePlugin) doLazyUpdate(ctx context.Context, msgKey string, qCtx *que
 
 	go func() {
 		_, _, _ = c.lazyUpdateSF.Do(msgKey, func() (interface{}, error) {
-			c.L().Debug("start lazy cache update", lazyQCtx.InfoField())
+			c.L().Info("LAZY UPDATE START", lazyQCtx.InfoField())
 			defer c.lazyUpdateSF.Forget(msgKey)
 
 			detached := &detachedContext{
@@ -278,11 +278,12 @@ func (c *cachePlugin) doLazyUpdate(ctx context.Context, msgKey string, qCtx *que
 			baseCtx, cancel := context.WithTimeout(detached, defaultLazyUpdateTimeout)
 			defer cancel()
 
-			lazyCtx := baseCtx
+			err := executable_seq.ExecChainNode(baseCtx, lazyQCtx, next)
 
-			err := executable_seq.ExecChainNode(lazyCtx, lazyQCtx, next)
 			if err != nil {
-				c.L().Warn("failed to update lazy cache", lazyQCtx.InfoField(), zap.Error(err))
+				c.L().Warn("LAZY UPDATE FAILED", lazyQCtx.InfoField(), zap.Error(err))
+			} else {
+				c.L().Info("LAZY UPDATE SUCCESS", lazyQCtx.InfoField())
 			}
 
 			r := lazyQCtx.R()
@@ -291,7 +292,6 @@ func (c *cachePlugin) doLazyUpdate(ctx context.Context, msgKey string, qCtx *que
 					c.L().Error("cache store", lazyQCtx.InfoField(), zap.Error(err))
 				}
 			}
-			c.L().Debug("lazy cache updated", lazyQCtx.InfoField())
 			return nil, nil
 		})
 	}()
