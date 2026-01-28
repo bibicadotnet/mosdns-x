@@ -2,19 +2,6 @@
  * Copyright (C) 2020-2022, IrineSistiana
  *
  * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 package dns_handler
@@ -40,31 +27,14 @@ const (
 
 var nopLogger = zap.NewNop()
 
-// Handler handles dns query.
 type Handler interface {
-	// ServeDNS handles incoming request req and returns a response.
-	// Implements must not keep and use req after the ServeDNS returned.
-	// ServeDNS should handle dns errors by itself and return a proper error responses
-	// for clients.
-	// ServeDNS should always return a responses.
-	// If ServeDNS returns an error, caller considers that the error is associated
-	// with the downstream connection and will close the downstream connection
-	// immediately.
-	// All input parameters won't be nil.
 	ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error)
 }
 
 type EntryHandlerOpts struct {
-	// Logger is used for logging. Default is a noop logger.
-	Logger *zap.Logger
-
-	Entry executable_seq.Executable
-
-	// QueryTimeout limits the timeout value of each query.
-	// Default is defaultQueryTimeout.
-	QueryTimeout time.Duration
-
-	// RecursionAvailable sets the dns.Msg.RecursionAvailable flag globally.
+	Logger             *zap.Logger
+	Entry              executable_seq.Executable
+	QueryTimeout       time.Duration
 	RecursionAvailable bool
 }
 
@@ -83,63 +53,71 @@ type EntryHandler struct {
 	opts EntryHandlerOpts
 }
 
-func NewEntryHandler(opts EntryHandlerOpts) (*EntryHandler, error) {
+// NewEntryHandler returns Handler interface directly (Option A - Standard)
+func NewEntryHandler(opts EntryHandlerOpts) (Handler, error) {
 	if err := opts.Init(); err != nil {
 		return nil, err
 	}
 	return &EntryHandler{opts: opts}, nil
 }
 
-// ServeDNS implements Handler.
-// If entry returns an error, a SERVFAIL response will be returned.
-// If entry returns without a response, a REFUSED response will be returned.
 func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error) {
-	// apply timeout to ctx
-	ddl := time.Now().Add(h.opts.QueryTimeout)
-	ctxDdl, ok := ctx.Deadline()
-	if !(ok && ctxDdl.Before(ddl)) {
-		newCtx, cancel := context.WithDeadline(ctx, ddl)
-		defer cancel()
-		ctx = newCtx
-	}
-	// return FORMERR response
+	// 1. Setup Query-level isolation context
+	qCtx, cancel := context.WithTimeout(ctx, h.opts.QueryTimeout)
+	defer cancel()
+
+	// 2. FormError checks
 	if len(req.Question) == 0 {
-		h.opts.Logger.Warn("zero question")
+		h.opts.Logger.Debug("request has zero question", zap.Stringer("from", meta.ClientAddr()))
 		return h.responseFormErr(req), nil
 	}
 	for _, question := range req.Question {
-		_, ok := dns.IsDomainName(question.Name)
-		if !ok {
-			h.opts.Logger.Warn(fmt.Sprintf("invalid question name: %s", question.Name))
+		if _, ok := dns.IsDomainName(question.Name); !ok {
+			h.opts.Logger.Debug("invalid question name", zap.String("name", question.Name))
 			return h.responseFormErr(req), nil
 		}
 	}
-	// cache original id
-	id := req.Id
 
-	// exec entry
-	qCtx := query_context.NewContext(req, meta)
-	err := h.opts.Entry.Exec(ctx, qCtx, nil)
-	respMsg := qCtx.R()
+	origID := req.Id
+	queryCtx := query_context.NewContext(req, meta)
+
+	// 3. Execute Pipeline with isolated context
+	// Verified signature: Exec(ctx context.Context, qCtx *query_context.Context, next Executable) error
+	err := h.opts.Entry.Exec(qCtx, queryCtx, nil)
+	respMsg := queryCtx.R()
+
+	// 4. Smart Logging (Downgrade expected network/timeout errors)
 	if err != nil {
-		h.opts.Logger.Warn("entry returned an err", qCtx.InfoField(), zap.Error(err))
-	} else {
-		h.opts.Logger.Debug("entry returned", qCtx.InfoField())
-	}
-	if err == nil && respMsg == nil {
-		h.opts.Logger.Error("entry returned an nil response", qCtx.InfoField())
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			h.opts.Logger.Debug("query interrupted", queryCtx.InfoField(), zap.Error(err))
+		} else {
+			h.opts.Logger.Warn("entry returned an err", queryCtx.InfoField(), zap.Error(err))
+		}
 	}
 
-	if respMsg == nil || err != nil {
+	// 5. Fallback Response Logic
+	if respMsg == nil {
+		if err == nil {
+			h.opts.Logger.Error("entry returned with nil response", queryCtx.InfoField())
+		}
+		
 		respMsg = new(dns.Msg)
 		respMsg.SetReply(req)
-		respMsg.Rcode = dns.RcodeServerFailure
+		
+		if err != nil {
+			respMsg.Rcode = dns.RcodeServerFailure // SERVFAIL for upstream/timeout issues
+		} else {
+			respMsg.Rcode = dns.RcodeRefused       // REFUSED for plugin logic gaps
+		}
 	}
 
+	// 6. Final headers
 	if h.opts.RecursionAvailable {
 		respMsg.RecursionAvailable = true
 	}
-	respMsg.Id = id
+	respMsg.Id = origID
+
+	// Always return nil error to keep the connection alive (Sequential/DoH/DoQ friendly)
 	return respMsg, nil
 }
 
@@ -153,6 +131,7 @@ func (h *EntryHandler) responseFormErr(req *dns.Msg) *dns.Msg {
 	return res
 }
 
+// DummyServerHandler for testing
 type DummyServerHandler struct {
 	T       *testing.T
 	WantMsg *dns.Msg
@@ -163,7 +142,6 @@ func (d *DummyServerHandler) ServeDNS(_ context.Context, req *dns.Msg, meta *que
 	if d.WantErr != nil {
 		return nil, d.WantErr
 	}
-
 	var resp *dns.Msg
 	if d.WantMsg != nil {
 		resp = d.WantMsg.Copy()
