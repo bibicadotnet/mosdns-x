@@ -21,7 +21,9 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -74,7 +76,6 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 		firstReadTimeout = idleTimeout
 	}
 
-	// handle listener
 	listenerCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	for {
@@ -86,7 +87,6 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 			return fmt.Errorf("unexpected listener err: %w", err)
 		}
 
-		// handle connection
 		quicConnCtx, cancelConn := context.WithCancel(listenerCtx)
 		closer := &quicCloser{conn: c}
 		go func() {
@@ -110,7 +110,6 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 					closer.close(1)
 					return
 				}
-				// handle stream
 				go func() {
 					req, _, err := dnsutils.ReadMsgFromTCP(stream)
 					timeout.Reset(idleTimeout)
@@ -129,11 +128,10 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 						return
 					}
 
-					// handle query
 					r, err := handler.ServeDNS(quicConnCtx, req, meta)
 					if err != nil {
 						stream.CancelWrite(1)
-						s.opts.Logger.Warn("handler err", zap.Error(err))
+						s.opts.Logger.Debug("handler err", zap.Error(err))
 						return
 					}
 
@@ -147,7 +145,11 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 
 					if _, err := dnsutils.WriteRawMsgToTCP(stream, b); err != nil {
 						stream.CancelWrite(1)
-						s.opts.Logger.Warn("failed to write response", zap.Stringer("client", c.RemoteAddr()), zap.Error(err))
+						errStr := err.Error()
+						if errors.Is(err, context.Canceled) || strings.Contains(errStr, "0x1") {
+							return
+						}
+						s.opts.Logger.Debug("failed to write response", zap.Stringer("client", c.RemoteAddr()), zap.Error(err))
 					}
 				}()
 			}
