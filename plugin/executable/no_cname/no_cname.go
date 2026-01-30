@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2025, pmkol
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package no_cname
 
 import (
@@ -42,37 +23,49 @@ type noCNAME struct {
 }
 
 func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
-	// Execute the rest of the chain first to get the response
 	if err := executable_seq.ExecChainNode(ctx, qCtx, next); err != nil {
 		return err
 	}
 	
 	r := qCtx.R()
-	// Skip if response is nil or has no questions
-	if r == nil || len(r.Question) == 0 {
+	if r == nil || len(r.Question) == 0 || len(r.Answer) == 0 {
 		return nil
 	}
 
-	// Only process CNAME flattening for A (IPv4) or AAAA (IPv6) records.
-	// Processing SRV, MX, or other types will cause malformed responses (SERVFAIL).
+	// 1. Only target A/AAAA queries
 	qType := r.Question[0].Qtype
 	if qType != dns.TypeA && qType != dns.TypeAAAA {
 		return nil
 	}
+
+	// 2. Quick check for IP records to maintain original semantics and optimize allocs
+	hasIP := false
+	for _, rr := range r.Answer {
+		if t := rr.Header().Rrtype; t == dns.TypeA || t == dns.TypeAAAA {
+			hasIP = true
+			break
+		}
+	}
+	if !hasIP {
+		return nil
+	}
 	
 	qName := r.Question[0].Name
-	filtered := r.Answer[:0]
+	var filtered []dns.RR
 	
 	for _, rr := range r.Answer {
-		// Remove CNAME records from the answer section
 		if rr.Header().Rrtype == dns.TypeCNAME {
 			continue
 		}
-		// Rewrite the record header name to match the original question name
-		rr.Header().Name = qName
-		filtered = append(filtered, rr)
+		
+		// 3. Deep Copy to prevent memory racing and side-effects on cached records
+		newRR := dns.Copy(rr)
+		newRR.Header().Name = qName
+		filtered = append(filtered, newRR)
 	}
 	
 	r.Answer = filtered
+	r.Extra = nil 
+	
 	return nil
 }
