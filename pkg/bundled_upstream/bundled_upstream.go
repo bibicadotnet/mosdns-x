@@ -49,6 +49,7 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 		return upstreams[0].Exchange(ctx, q)
 	}
 
+	// Rule: Use caller's context directly. Racing ends when the first success is found.
 	taskCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -75,24 +76,31 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 		close(c)
 	}()
 
-	var errMsgs []string
+	errMsgs := make([]string, 0, t)
 	var trustedResponse *dns.Msg
 
 	for res := range c {
 		if res.err != nil {
-			if errors.Is(res.err, context.Canceled) || errors.Is(res.err, context.DeadlineExceeded) {
-				logger.Debug("upstream canceled or timed out",
+			// Rule: Distinguish between racing cancellation, timeout, and actual network errors.
+			if errors.Is(res.err, context.Canceled) {
+				logger.Debug("upstream exchange canceled (racing loser)",
+					qCtx.InfoField(),
+					zap.String("addr", res.from.Address()))
+			} else if errors.Is(res.err, context.DeadlineExceeded) {
+				logger.Warn("upstream exchange timed out",
 					qCtx.InfoField(),
 					zap.String("addr", res.from.Address()))
 			} else {
 				logger.Warn("upstream exchange failed",
 					qCtx.InfoField(),
 					zap.String("addr", res.from.Address()),
+					zap.Bool("trusted", res.from.Trusted()),
 					zap.Error(res.err))
-			}
-
-			if !errors.Is(res.err, context.Canceled) && !errors.Is(res.err, context.DeadlineExceeded) {
-				errMsgs = append(errMsgs, fmt.Sprintf("[%s: %v]", res.from.Address(), res.err))
+				
+				// Only aggregate errors from trusted upstreams to reduce log noise.
+				if res.from.Trusted() {
+					errMsgs = append(errMsgs, fmt.Sprintf("[%s: %v]", res.from.Address(), res.err))
+				}
 			}
 			continue
 		}
@@ -101,38 +109,45 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 			continue
 		}
 
-		// ANY upstream with SUCCESS → Return immediately
-		if res.r.Rcode == dns.RcodeSuccess {
+		// Success-priority Rule: 
+		// Return immediately ONLY if NOERROR and Answer is NOT empty.
+		// This prevents accepting empty results (NODATA) prematurely.
+		if res.r.Rcode == dns.RcodeSuccess && len(res.r.Answer) > 0 {
 			cancel()
 			return res.r, nil
 		}
 
-		// Trusted upstream with error response → Save for fallback
-		if res.from.Trusted() {
+		// Fallback Rule: 
+		// Deterministically keep the first trusted response (including NXDOMAIN/NODATA)
+		// as a fallback if no "perfect" NOERROR response is received from others.
+		if res.from.Trusted() && trustedResponse == nil {
 			trustedResponse = res.r
-			errMsgs = append(errMsgs, fmt.Sprintf("[%s: rcode %s]", res.from.Address(), dns.RcodeToString[res.r.Rcode]))
-		} else {
-			// Untrusted upstream with error response → Discard
+			if res.r.Rcode != dns.RcodeSuccess {
+				errMsgs = append(errMsgs, fmt.Sprintf("[%s: rcode %s]", res.from.Address(), dns.RcodeToString[res.r.Rcode]))
+			}
+		} else if !res.from.Trusted() {
 			logger.Debug("discarded untrusted error response",
 				qCtx.InfoField(),
 				zap.String("addr", res.from.Address()),
-				zap.String("rcode", dns.RcodeToString[res.r.Rcode]))
-			errMsgs = append(errMsgs, fmt.Sprintf("[%s: rcode %s]", res.from.Address(), dns.RcodeToString[res.r.Rcode]))
+				zap.String("rcode", dns.RcodeToString[res.r.Rcode]),
+				zap.Bool("trusted", false))
 		}
 	}
 
-	// No SUCCESS found, return trusted error response if available
+	// No "Success + Answer" found. Return the first available trusted response.
 	if trustedResponse != nil {
 		return trustedResponse, nil
 	}
 
+	// Check if the entire process failed due to parent context deadline.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
+	// Use %w to wrap ErrAllFailed so callers can still use errors.Is().
 	var detailedErr error
 	if len(errMsgs) > 0 {
-		detailedErr = errors.New("all upstreams failed: " + strings.Join(errMsgs, ", "))
+		detailedErr = fmt.Errorf("%w: %s", ErrAllFailed, strings.Join(errMsgs, ", "))
 	} else {
 		detailedErr = ErrAllFailed
 	}
