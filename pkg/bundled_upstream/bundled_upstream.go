@@ -76,13 +76,20 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 	}()
 
 	var errMsgs []string
+	var trustedResponse *dns.Msg
 
 	for res := range c {
 		if res.err != nil {
-			logger.Debug("upstream exchange failed",
-				qCtx.InfoField(),
-				zap.String("addr", res.from.Address()),
-				zap.Error(res.err))
+			if errors.Is(res.err, context.Canceled) || errors.Is(res.err, context.DeadlineExceeded) {
+				logger.Debug("upstream canceled or timed out",
+					qCtx.InfoField(),
+					zap.String("addr", res.from.Address()))
+			} else {
+				logger.Warn("upstream exchange failed",
+					qCtx.InfoField(),
+					zap.String("addr", res.from.Address()),
+					zap.Error(res.err))
+			}
 
 			if !errors.Is(res.err, context.Canceled) && !errors.Is(res.err, context.DeadlineExceeded) {
 				errMsgs = append(errMsgs, fmt.Sprintf("[%s: %v]", res.from.Address(), res.err))
@@ -90,18 +97,33 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 			continue
 		}
 
-		if res.r != nil && (res.from.Trusted() || res.r.Rcode == dns.RcodeSuccess) {
+		if res.r == nil {
+			continue
+		}
+
+		// ANY upstream with SUCCESS → Return immediately
+		if res.r.Rcode == dns.RcodeSuccess {
 			cancel()
 			return res.r, nil
 		}
 
-		if res.r != nil {
+		// Trusted upstream with error response → Save for fallback
+		if res.from.Trusted() {
+			trustedResponse = res.r
+			errMsgs = append(errMsgs, fmt.Sprintf("[%s: rcode %s]", res.from.Address(), dns.RcodeToString[res.r.Rcode]))
+		} else {
+			// Untrusted upstream with error response → Discard
 			logger.Debug("discarded untrusted error response",
 				qCtx.InfoField(),
 				zap.String("addr", res.from.Address()),
 				zap.String("rcode", dns.RcodeToString[res.r.Rcode]))
 			errMsgs = append(errMsgs, fmt.Sprintf("[%s: rcode %s]", res.from.Address(), dns.RcodeToString[res.r.Rcode]))
 		}
+	}
+
+	// No SUCCESS found, return trusted error response if available
+	if trustedResponse != nil {
+		return trustedResponse, nil
 	}
 
 	if err := ctx.Err(); err != nil {
