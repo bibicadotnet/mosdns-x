@@ -2,19 +2,6 @@
  * Copyright (C) 2020-2022, IrineSistiana
  *
  * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 package fastforward
@@ -56,13 +43,13 @@ type fastForward struct {
 
 type Args struct {
 	Upstream []*UpstreamConfig `yaml:"upstream"`
-	CA       []string          `yaml:"ca"`
+	CA        []string          `yaml:"ca"`
 }
 
 type UpstreamConfig struct {
 	Addr           string `yaml:"addr"` // required
 	DialAddr       string `yaml:"dial_addr"`
-	Trusted        bool   `yaml:"trusted"`
+	Trusted        bool   `yaml:"trusted"` // Ignored by racing logic, kept for config compatibility
 	Socks5         string `yaml:"socks5"`
 	S5Username     string `yaml:"s5_username"`
 	S5Password     string `yaml:"s5_password"`
@@ -73,8 +60,8 @@ type UpstreamConfig struct {
 	EnablePipeline bool   `yaml:"enable_pipeline"`
 	Bootstrap      string `yaml:"bootstrap"`
 	Insecure       bool   `yaml:"insecure"`
-	KernelTX       bool   `yaml:"kernel_tx"` // use kernel tls to send data
-	KernelRX       bool   `yaml:"kernel_rx"` // use kernel tls to receive data
+	KernelTX       bool   `yaml:"kernel_tx"` 
+	KernelRX       bool   `yaml:"kernel_rx"` 
 }
 
 func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
@@ -91,7 +78,7 @@ func newFastForward(bp *coremain.BP, args *Args) (*fastForward, error) {
 		args: args,
 	}
 
-	// rootCAs
+	// Load custom CAs if provided
 	var rootCAs *x509.CertPool
 	if len(args.CA) != 0 {
 		var err error
@@ -101,17 +88,16 @@ func newFastForward(bp *coremain.BP, args *Args) (*fastForward, error) {
 		}
 	}
 
-	for i, c := range args.Upstream {
+	for _, c := range args.Upstream {
 		if len(c.Addr) == 0 {
 			return nil, errors.New("missing server addr")
 		}
 
+		// Handle Experimental UDPME
 		if strings.HasPrefix(c.Addr, "udpme://") {
-			u := newUDPME(c.Addr[8:], c.Trusted)
+			// In our racing logic, every upstream is equally handled.
+			u := newUDPME(c.Addr[8:])
 			f.upstreamWrappers = append(f.upstreamWrappers, u)
-			if i == 0 {
-				u.trusted = true
-			}
 			continue
 		}
 
@@ -138,14 +124,10 @@ func newFastForward(bp *coremain.BP, args *Args) (*fastForward, error) {
 			return nil, fmt.Errorf("failed to init upstream: %w", err)
 		}
 
+		// Wrap the upstream. The wrapper no longer stores a per-upstream 'trusted' flag.
 		w := &upstreamWrapper{
 			address: c.Addr,
-			trusted: c.Trusted,
 			u:       u,
-		}
-
-		if i == 0 { // Set first upstream as trusted upstream.
-			w.trusted = true
 		}
 
 		f.upstreamWrappers = append(f.upstreamWrappers, w)
@@ -157,11 +139,11 @@ func newFastForward(bp *coremain.BP, args *Args) (*fastForward, error) {
 
 type upstreamWrapper struct {
 	address string
-	trusted bool
-	u       upstream.Upstream
+	u        upstream.Upstream
 }
 
 func (u *upstreamWrapper) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+	// Enable DNS message compression for better efficiency
 	q.Compress = true
 	return u.u.ExchangeContext(ctx, q)
 }
@@ -170,14 +152,13 @@ func (u *upstreamWrapper) Address() string {
 	return u.address
 }
 
+// Trusted always returns true. 
+// The actual selection logic in bundled_upstream now uses semantic priority (Racing)
+// instead of this flag.
 func (u *upstreamWrapper) Trusted() bool {
-	return u.trusted
+	return true
 }
 
-// Exec forwards qCtx.Q() to upstreams, and sets qCtx.R().
-// qCtx.Status() will be set as
-// - handler.ContextStatusResponded: if it received a response.
-// - handler.ContextStatusServerFailed: if all upstreams failed.
 func (f *fastForward) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	err := f.exec(ctx, qCtx)
 	if err != nil {
@@ -187,6 +168,7 @@ func (f *fastForward) Exec(ctx context.Context, qCtx *query_context.Context, nex
 }
 
 func (f *fastForward) exec(ctx context.Context, qCtx *query_context.Context) (err error) {
+	// Trigger the high-performance racing logic
 	r, err := bundled_upstream.ExchangeParallel(ctx, qCtx, f.upstreamWrappers, f.L())
 	if err != nil {
 		return err
@@ -197,7 +179,9 @@ func (f *fastForward) exec(ctx context.Context, qCtx *query_context.Context) (er
 
 func (f *fastForward) Shutdown() error {
 	for _, u := range f.upstreamsCloser {
-		u.Close()
+		if err := u.Close(); err != nil {
+			f.L().Error("failed to close upstream", zap.String("addr", u.(interface{ Address() string }).Address()), zap.Error(err))
+		}
 	}
 	return nil
 }
