@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2020-2026, IrineSistiana
+ * Updated: Production-hardened Cache with original Warn logging for Lazy Updates
+ */
+
 package cache
 
 import (
@@ -256,7 +261,7 @@ func (c *cachePlugin) doLazyUpdate(ctx context.Context, msgKey string, qCtx *que
 
 			err := executable_seq.ExecChainNode(lazyCtx, lazyQCtx, next)
 			if err != nil {
-				// Lazy update failures are expected (timeouts, upstream errors)
+				c.L().Warn("failed to update lazy cache", lazyQCtx.InfoField(), zap.Error(err))
 				return nil, nil
 			}
 
