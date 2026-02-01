@@ -1,8 +1,3 @@
-/*
- * Copyright (C) 2020-2026, IrineSistiana
- * Updated: Production-hardened Cache with original Warn logging for Lazy Updates
- */
-
 package cache
 
 import (
