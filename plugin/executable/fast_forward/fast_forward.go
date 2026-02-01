@@ -60,8 +60,8 @@ type UpstreamConfig struct {
 	EnablePipeline bool   `yaml:"enable_pipeline"`
 	Bootstrap      string `yaml:"bootstrap"`
 	Insecure       bool   `yaml:"insecure"`
-	KernelTX       bool   `yaml:"kernel_tx"` 
-	KernelRX       bool   `yaml:"kernel_rx"` 
+	KernelTX       bool   `yaml:"kernel_tx"`
+	KernelRX       bool   `yaml:"kernel_rx"`
 }
 
 func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
@@ -78,7 +78,6 @@ func newFastForward(bp *coremain.BP, args *Args) (*fastForward, error) {
 		args: args,
 	}
 
-	// Load custom CAs if provided
 	var rootCAs *x509.CertPool
 	if len(args.CA) != 0 {
 		var err error
@@ -95,9 +94,9 @@ func newFastForward(bp *coremain.BP, args *Args) (*fastForward, error) {
 
 		// Handle Experimental UDPME
 		if strings.HasPrefix(c.Addr, "udpme://") {
-			// In our racing logic, every upstream is equally handled.
 			u := newUDPME(c.Addr[8:])
 			f.upstreamWrappers = append(f.upstreamWrappers, u)
+			// UDPME doesn't need closer as it creates connection per request
 			continue
 		}
 
@@ -124,7 +123,6 @@ func newFastForward(bp *coremain.BP, args *Args) (*fastForward, error) {
 			return nil, fmt.Errorf("failed to init upstream: %w", err)
 		}
 
-		// Wrap the upstream. The wrapper no longer stores a per-upstream 'trusted' flag.
 		w := &upstreamWrapper{
 			address: c.Addr,
 			u:       u,
@@ -139,11 +137,10 @@ func newFastForward(bp *coremain.BP, args *Args) (*fastForward, error) {
 
 type upstreamWrapper struct {
 	address string
-	u        upstream.Upstream
+	u       upstream.Upstream
 }
 
 func (u *upstreamWrapper) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
-	// Enable DNS message compression for better efficiency
 	q.Compress = true
 	return u.u.ExchangeContext(ctx, q)
 }
@@ -152,9 +149,6 @@ func (u *upstreamWrapper) Address() string {
 	return u.address
 }
 
-// Trusted always returns true. 
-// The actual selection logic in bundled_upstream now uses semantic priority (Racing)
-// instead of this flag.
 func (u *upstreamWrapper) Trusted() bool {
 	return true
 }
@@ -168,7 +162,6 @@ func (f *fastForward) Exec(ctx context.Context, qCtx *query_context.Context, nex
 }
 
 func (f *fastForward) exec(ctx context.Context, qCtx *query_context.Context) (err error) {
-	// Trigger the high-performance racing logic
 	r, err := bundled_upstream.ExchangeParallel(ctx, qCtx, f.upstreamWrappers, f.L())
 	if err != nil {
 		return err
@@ -179,9 +172,7 @@ func (f *fastForward) exec(ctx context.Context, qCtx *query_context.Context) (er
 
 func (f *fastForward) Shutdown() error {
 	for _, u := range f.upstreamsCloser {
-		if err := u.Close(); err != nil {
-			f.L().Error("failed to close upstream", zap.String("addr", u.(interface{ Address() string }).Address()), zap.Error(err))
-		}
+		_ = u.Close() // Silently close during shutdown
 	}
 	return nil
 }
