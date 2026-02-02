@@ -48,16 +48,15 @@ func init() {
 var _ coremain.MatcherPlugin = (*responseMatcher)(nil)
 
 type Args struct {
-	RCode  []int    `yaml:"rcode"`
-	IP     []string `yaml:"ip"`
-	CNAME  []string `yaml:"cname"`
-	MinTTL uint32   `yaml:"min_ttl"` // Minimum TTL threshold
-	MaxTTL uint32   `yaml:"max_ttl"` // Maximum TTL threshold
+	RCode []int    `yaml:"rcode"`
+	IP    []string `yaml:"ip"`
+	CNAME []string `yaml:"cname"`
 }
 
 type responseMatcher struct {
 	*coremain.BP
-	args         *Args
+	args *Args
+
 	matcherGroup []executable_seq.Matcher
 	closer       []io.Closer
 }
@@ -109,53 +108,7 @@ func newResponseMatcher(bp *coremain.BP, args *Args) (m *responseMatcher, err er
 		bp.L().Info("ip matcher loaded", zap.Int("length", l.Len()))
 	}
 
-	// Add TTL matcher if configured
-	if args.MinTTL > 0 || args.MaxTTL > 0 {
-		m.matcherGroup = append(m.matcherGroup, &ttlMatcher{
-			minTTL: args.MinTTL,
-			maxTTL: args.MaxTTL,
-		})
-		bp.L().Info("ttl matcher loaded", zap.Uint32("min_ttl", args.MinTTL), zap.Uint32("max_ttl", args.MaxTTL))
-	}
-
 	return m, nil
-}
-
-// ttlMatcher matches responses based on TTL values
-type ttlMatcher struct {
-	minTTL uint32
-	maxTTL uint32
-}
-
-func (t *ttlMatcher) Match(_ context.Context, qCtx *query_context.Context) (matched bool, err error) {
-	r := qCtx.R()
-	if r == nil {
-		return false, nil
-	}
-
-	// Check TTL in Answer section
-	for _, rr := range r.Answer {
-		ttl := rr.Header().Ttl
-
-		// If both min and max are set, check range
-		if t.minTTL > 0 && t.maxTTL > 0 {
-			if ttl >= t.minTTL && ttl <= t.maxTTL {
-				return true, nil
-			}
-		} else if t.minTTL > 0 {
-			// Only min is set
-			if ttl >= t.minTTL {
-				return true, nil
-			}
-		} else if t.maxTTL > 0 {
-			// Only max is set
-			if ttl <= t.maxTTL {
-				return true, nil
-			}
-		}
-	}
-
-	return false, nil
 }
 
 type hasValidAnswer struct {
@@ -187,6 +140,7 @@ func (e *hasValidAnswer) match(qCtx *query_context.Context) (matched bool) {
 			return true
 		}
 	}
+
 	return false
 }
 
