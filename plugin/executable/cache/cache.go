@@ -189,6 +189,21 @@ func (c *cachePlugin) getMsgKey(q *dns.Msg) (string, error) {
 	if isSimpleQuery || c.args.CacheEverything {
 		return dnsutils.GetMsgKey(q, 0)
 	}
+	
+	// When cache_everything is false, cache using only Question section (domain + type)
+	// This increases cache hit rate by ignoring Answer/Ns/Extra metadata
+	if len(q.Question) == 1 {
+		simpleQ := *q
+		simpleQ.Answer = nil
+		simpleQ.Ns = nil
+		simpleQ.Extra = nil
+		msgKey, err := dnsutils.GetMsgKey(&simpleQ, 0)
+		if err != nil {
+			return "", fmt.Errorf("failed to get msg key, %w", err)
+		}
+		return msgKey, nil
+	}
+	
 	return "", nil
 }
 
