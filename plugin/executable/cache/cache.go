@@ -67,15 +67,6 @@ type cachePlugin struct {
 	size         prometheus.GaugeFunc
 }
 
-type detachedContext struct {
-	context.Context
-	parentValues context.Context
-}
-
-func (d *detachedContext) Value(key interface{}) interface{} {
-	return d.parentValues.Value(key)
-}
-
 func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
 	return newCachePlugin(bp, args.(*Args))
 }
@@ -165,7 +156,7 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 
 	if lazyHit {
 		c.lazyHitTotal.Inc()
-		c.doLazyUpdate(ctx, msgKey, qCtx, next)
+		c.doLazyUpdate(msgKey, qCtx, next)
 	}
 
 	if cachedResp != nil {
@@ -244,36 +235,36 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 	return nil, false, nil
 }
 
-func (c *cachePlugin) doLazyUpdate(ctx context.Context, msgKey string, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
+// doLazyUpdate starts a background goroutine to update the cache asynchronously.
+// It uses singleflight to deduplicate concurrent updates for the same msgKey.
+// The lazy update uses a detached context to prevent cancellation propagation from the original request,
+// while qCtx.Copy() preserves all necessary query metadata (client IP, ECS settings, etc.).
+func (c *cachePlugin) doLazyUpdate(msgKey string, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
 	lazyQCtx := qCtx.Copy()
 
-	go func() {
-		_, _, _ = c.lazyUpdateSF.Do(msgKey, func() (interface{}, error) {
-			c.L().Debug("start lazy cache update", lazyQCtx.InfoField())
-			defer c.lazyUpdateSF.Forget(msgKey)
+	lazyUpdateFunc := func() (interface{}, error) {
+		c.L().Debug("start lazy cache update", lazyQCtx.InfoField())
+		defer c.lazyUpdateSF.Forget(msgKey)
 
-			detached := &detachedContext{
-				Context:      context.Background(),
-				parentValues: ctx,
-			}
-			lazyCtx, cancel := context.WithTimeout(detached, defaultLazyUpdateTimeout)
-			defer cancel()
+		lazyCtx, cancel := context.WithTimeout(context.Background(), defaultLazyUpdateTimeout)
+		defer cancel()
 
-			err := executable_seq.ExecChainNode(lazyCtx, lazyQCtx, next)
-			if err != nil {
-				c.L().Warn("failed to update lazy cache", lazyQCtx.InfoField(), zap.Error(err))
-			}
+		err := executable_seq.ExecChainNode(lazyCtx, lazyQCtx, next)
+		if err != nil {
+			c.L().Warn("failed to update lazy cache", lazyQCtx.InfoField(), zap.Error(err))
+		}
 
-			// Try storing response even if execution failed (e.g., deadline exceeded),
-			// provided a response object was populated in qCtx.
-			r := lazyQCtx.R()
-			if r != nil {
-				_ = c.tryStoreMsg(msgKey, r)
-			}
-			c.L().Debug("lazy cache updated", lazyQCtx.InfoField())
-			return nil, nil
-		})
-	}()
+		// Try storing response even if execution failed (e.g., deadline exceeded),
+		// provided a response object was populated in qCtx.
+		r := lazyQCtx.R()
+		if r != nil {
+			_ = c.tryStoreMsg(msgKey, r)
+		}
+		c.L().Debug("lazy cache updated", lazyQCtx.InfoField())
+		return nil, nil
+	}
+
+	c.lazyUpdateSF.DoChan(msgKey, lazyUpdateFunc)
 }
 
 func (c *cachePlugin) tryStoreMsg(key string, r *dns.Msg) error {
