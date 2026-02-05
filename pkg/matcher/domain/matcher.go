@@ -44,7 +44,11 @@ func NewSubDomainMatcher[T any]() *SubDomainMatcher[T] {
 }
 
 func (m *SubDomainMatcher[T]) Match(s string) (T, bool) {
-	s = NormalizeDomain(s)
+	return m.matchNormalized(NormalizeDomain(s))
+}
+
+// matchNormalized assumes s is already normalized.
+func (m *SubDomainMatcher[T]) matchNormalized(s string) (T, bool) {
 	ds := NewReverseDomainScanner(s)
 	currentNode := m.root
 	var v T
@@ -101,7 +105,10 @@ func (m *FullMatcher[T]) Add(s string, v T) error {
 }
 
 func (m *FullMatcher[T]) Match(s string) (v T, ok bool) {
-	s = NormalizeDomain(s)
+	return m.matchNormalized(NormalizeDomain(s))
+}
+
+func (m *FullMatcher[T]) matchNormalized(s string) (v T, ok bool) {
 	v, ok = m.m[s]
 	return
 }
@@ -127,7 +134,10 @@ func (m *KeywordMatcher[T]) Add(keyword string, v T) error {
 }
 
 func (m *KeywordMatcher[T]) Match(s string) (v T, ok bool) {
-	s = NormalizeDomain(s)
+	return m.matchNormalized(NormalizeDomain(s))
+}
+
+func (m *KeywordMatcher[T]) matchNormalized(s string) (v T, ok bool) {
 	for k, v := range m.kws {
 		if strings.Contains(s, k) {
 			return v, true
@@ -173,7 +183,12 @@ func (m *RegexMatcher[T]) Add(expr string, v T) error {
 }
 
 func (m *RegexMatcher[T]) Match(s string) (v T, ok bool) {
-	s = NormalizeDomain(s)
+	// Normalization is handled inside matchNormalized (recursively or skipped depending on implementation)
+	// But since MixMatcher calls NormalizeDomain, we pass it here.
+	return m.matchNormalized(NormalizeDomain(s))
+}
+
+func (m *RegexMatcher[T]) matchNormalized(s string) (v T, ok bool) {
 	for _, e := range m.regs {
 		if e.reg.MatchString(s) {
 			return e.v, true
@@ -247,22 +262,47 @@ func (m *MixMatcher[T]) Add(s string, v T) error {
 	return sm.Add(pattern, v)
 }
 
+// Match is now fully optimized. It normalizes once and reuses the result.
 func (m *MixMatcher[T]) Match(s string) (v T, ok bool) {
-	for _, matcher := range [...]Matcher[T]{m.full, m.domain, m.regex, m.keyword} {
-		if v, ok = matcher.Match(s); ok {
-			return v, true
-		}
+	// OPTIMIZATION: Normalize once here.
+	s = NormalizeDomain(s)
+
+	// 1. Full Matcher
+	if v, ok = m.full.matchNormalized(s); ok {
+		return v, true
 	}
+
+	// 2. Domain Matcher
+	if v, ok = m.domain.matchNormalized(s); ok {
+		return v, true
+	}
+
+	// 3. Regex Matcher
+	if v, ok = m.regex.matchNormalized(s); ok {
+		return v, true
+	}
+
+	// 4. Keyword Matcher
+	if v, ok = m.keyword.matchNormalized(s); ok {
+		return v, true
+	}
+
 	return
 }
 
 func (m *MixMatcher[T]) Len() int {
 	sum := 0
-	for _, matcher := range [...]Matcher[T]{m.full, m.domain, m.regex, m.keyword} {
-		if matcher == nil {
-			continue
-		}
-		sum += matcher.Len()
+	if m.full != nil {
+		sum += m.full.Len()
+	}
+	if m.domain != nil {
+		sum += m.domain.Len()
+	}
+	if m.regex != nil {
+		sum += m.regex.Len()
+	}
+	if m.keyword != nil {
+		sum += m.keyword.Len()
 	}
 	return sum
 }
