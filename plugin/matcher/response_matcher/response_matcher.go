@@ -1,29 +1,9 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package responsematcher
 
 import (
 	"context"
 	"io"
 
-	"github.com/miekg/dns"
 	"go.uber.org/zap"
 
 	"github.com/pmkol/mosdns-x/coremain"
@@ -39,7 +19,6 @@ const PluginType = "response_matcher"
 
 func init() {
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(Args) })
-
 	coremain.RegNewPersetPluginFunc("_response_valid_answer", func(bp *coremain.BP) (coremain.Plugin, error) {
 		return &hasValidAnswer{BP: bp}, nil
 	})
@@ -117,27 +96,30 @@ type hasValidAnswer struct {
 
 var _ coremain.MatcherPlugin = (*hasValidAnswer)(nil)
 
-func (e *hasValidAnswer) match(qCtx *query_context.Context) (matched bool) {
+func (e *hasValidAnswer) match(qCtx *query_context.Context) bool {
 	r := qCtx.R()
 	if r == nil {
 		return false
 	}
 
 	q := qCtx.Q()
-	m := make(map[dns.Question]struct{})
-	for _, question := range q.Question {
-		m[question] = struct{}{}
+	if q == nil {
+		return false
+	}
+
+	questions := q.Question
+	if len(questions) == 0 {
+		return false
 	}
 
 	for _, rr := range r.Answer {
 		h := rr.Header()
-		q := dns.Question{
-			Name:   h.Name,
-			Qtype:  h.Rrtype,
-			Qclass: h.Class,
-		}
-		if _, ok := m[q]; ok {
-			return true
+		for _, question := range questions {
+			if h.Rrtype == question.Qtype &&
+				h.Class == question.Qclass &&
+				h.Name == question.Name {
+				return true
+			}
 		}
 	}
 
