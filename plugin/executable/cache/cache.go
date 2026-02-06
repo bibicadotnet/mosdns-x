@@ -200,6 +200,7 @@ func (c *cachePlugin) buildKey(q *dns.Msg) (string, error) {
 }
 
 func (c *cachePlugin) lookup(key string) (msg *dns.Msg, lazy bool, err error) {
+	// Match backend API: Get(key) (value, storedAt, expirationTime)
 	v, stored, _ := c.backend.Get(key)
 	if v == nil || len(v) < 4 {
 		return nil, false, nil
@@ -249,7 +250,7 @@ func (c *cachePlugin) triggerLazyUpdate(
 	next executable_seq.ExecutableChainNode,
 ) {
 	go func() {
-		// FIX: Use 3 return values to match latest singleflight.Do signature
+		// FIXED: singleflight.Do returns 3 values (v, err, shared) as per documentation
 		_, _, _ = c.sf.Do(key, func() (any, error) {
 			c.L().Debug("lazy update start", zap.String("key", key))
 
@@ -315,12 +316,13 @@ func (c *cachePlugin) store(key string, r *dns.Msg) error {
 	copy(buf[4:], finalPayload)
 
 	now := time.Now()
-	storageTTL := time.Duration(ttl) * time.Second
+	storageDuration := time.Duration(ttl) * time.Second
 	if c.args.LazyCacheTTL > 0 {
-		storageTTL += time.Duration(c.args.LazyCacheTTL) * time.Second
+		storageDuration += time.Duration(c.args.LazyCacheTTL) * time.Second
 	}
 
-	c.backend.Store(key, buf, now, now.Add(storageTTL))
+	// Match backend API: Store(key, v, storedTime, expirationTime)
+	c.backend.Store(key, buf, now, now.Add(storageDuration))
 	return nil
 }
 
