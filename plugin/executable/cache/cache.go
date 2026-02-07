@@ -43,14 +43,16 @@ type Args struct {
 	CacheEverything   bool   `yaml:"cache_everything"`
 	CompressResp      bool   `yaml:"compress_resp"`
 	WhenHit           string `yaml:"when_hit"`
+	LazyExec          string `yaml:"lazy_exec"`
 }
 
 type cachePlugin struct {
 	*coremain.BP
 	args *Args
 
-	whenHit executable_seq.Executable
-	backend cache.Backend
+	whenHit  executable_seq.Executable
+	lazyExec executable_seq.Executable
+	backend  cache.Backend
 
 	sf singleflight.Group
 
@@ -106,11 +108,20 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 		}
 	}
 
+	var lazyExec executable_seq.Executable
+	if args.LazyExec != "" {
+		lazyExec = bp.M().GetExecutables()[args.LazyExec]
+		if lazyExec == nil {
+			return nil, fmt.Errorf("cannot find executable %s", args.LazyExec)
+		}
+	}
+
 	p := &cachePlugin{
-		BP:      bp,
-		args:    args,
-		whenHit: whenHit,
-		backend: backend,
+		BP:       bp,
+		args:     args,
+		whenHit:  whenHit,
+		lazyExec: lazyExec,
+		backend:  backend,
 
 		queryTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "query_total",
@@ -189,12 +200,10 @@ func (c *cachePlugin) buildKey(q *dns.Msg) (string, error) {
 		return "", nil
 	}
 
-	// Hot-path: Direct key for simple queries (No struct copy)
 	if len(q.Answer) == 0 && len(q.Ns) == 0 && len(q.Extra) == 0 {
 		return dnsutils.GetMsgKey(q, 0)
 	}
 
-	// Normalize key for domain + type only if metadata exists (Copy only when needed)
 	simpleQ := *q
 	simpleQ.Answer, simpleQ.Ns, simpleQ.Extra = nil, nil, nil
 	return dnsutils.GetMsgKey(&simpleQ, 0)
@@ -210,7 +219,6 @@ func (c *cachePlugin) lookup(key string) (msg *dns.Msg, lazy bool, err error) {
 	var payload []byte
 	isNewFormat := false
 
-	// Format Detection [Magic: 2B][Version: 1B]
 	if len(v) >= 7 && binary.BigEndian.Uint16(v[0:2]) == cacheMagic {
 		if v[2] == cacheVersion {
 			ttl = binary.BigEndian.Uint32(v[3:7])
@@ -226,7 +234,7 @@ func (c *cachePlugin) lookup(key string) (msg *dns.Msg, lazy bool, err error) {
 		if c.args.CompressResp {
 			decLen, err := snappy.DecodedLen(payload)
 			if err != nil || decLen <= 0 || decLen > dns.MaxMsgSize {
-				return nil, false, nil // Silent drop/Miss
+				return nil, false, nil
 			}
 			decBuf := pool.GetBuf(decLen)
 			defer decBuf.Release()
@@ -240,7 +248,6 @@ func (c *cachePlugin) lookup(key string) (msg *dns.Msg, lazy bool, err error) {
 			return nil, false, nil
 		}
 	} else {
-		// Legacy Fallback with Decompression support
 		payload = v
 		if c.args.CompressResp {
 			decLen, err := snappy.DecodedLen(payload)
@@ -265,7 +272,6 @@ func (c *cachePlugin) lookup(key string) (msg *dns.Msg, lazy bool, err error) {
 		}
 	}
 
-	// Unified TTL check (Fresh vs Stale)
 	now := time.Now()
 	elapsed := uint32(now.Sub(stored).Seconds())
 
@@ -290,7 +296,15 @@ func (c *cachePlugin) triggerLazyUpdate(key string, qCtx *query_context.Context,
 			lazyQCtx.SetResponse(nil)
 			ctx, cancel := context.WithTimeout(context.Background(), defaultLazyUpdateTimeout)
 			defer cancel()
-			if err := executable_seq.ExecChainNode(ctx, lazyQCtx, next); err != nil {
+
+			var err error
+			if c.lazyExec != nil {
+				err = c.lazyExec.Exec(ctx, lazyQCtx, nil)
+			} else {
+				err = executable_seq.ExecChainNode(ctx, lazyQCtx, next)
+			}
+
+			if err != nil {
 				c.L().Warn("lazy update failed", zap.Error(err), zap.String("key", key))
 				return nil, err
 			}
