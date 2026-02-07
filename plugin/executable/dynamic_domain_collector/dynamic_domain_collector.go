@@ -31,10 +31,10 @@ func getBaseDomain(d string) string {
 	d = strings.ToLower(strings.TrimSpace(d))
 	d = strings.TrimSuffix(d, ".")
 
-	// Get the effective TLD plus one label (e.g., "microsoft.com" from "a.b.microsoft.com")
+	// Extract eTLD+1 (e.g., "google.co.uk" from "www.google.co.uk") using Mozilla's PSL
 	base, err := publicsuffix.EffectiveTLDPlusOne(d)
 	if err != nil {
-		return d // safe fallback to original input
+		return d
 	}
 	return base
 }
@@ -82,12 +82,13 @@ func (c *Collector) Exec(ctx context.Context, qCtx *query_context.Context, next 
 
 	if !exists {
 		c.mu.Lock()
+		// Double-check: ensure the domain wasn't added by another goroutine while waiting for the lock
 		if _, stillExists := c.seen[domain]; !stillExists {
 			f, err := os.OpenFile(c.fileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if err == nil {
 				defer f.Close()
 
-				// Safe Append logic
+				// Safe Append: verify if the existing file ends with a newline to prevent concatenation
 				if info, errStat := f.Stat(); errStat == nil && info.Size() > 0 {
 					if rf, errRef := os.Open(c.fileName); errRef == nil {
 						lastByte := make([]byte, 1)
