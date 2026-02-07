@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package mem_cache
 
 import (
@@ -31,8 +12,6 @@ const (
 	defaultCleanerInterval = time.Minute
 )
 
-// MemCache is a simple LRU cache that stores values in memory.
-// It is safe for concurrent use.
 type MemCache struct {
 	closed           uint32
 	closeCleanerChan chan struct{}
@@ -40,16 +19,11 @@ type MemCache struct {
 }
 
 type elem struct {
-	v              []byte
-	storedTime     time.Time
-	expirationTime time.Time
+	v  []byte // slice header (24B)
+	st int64  // storedTime.Unix() (8B)
+	ex int64  // expirationTime.Unix() (8B) - Bao gồm cả Lazy TTL
 }
 
-// NewMemCache initializes a MemCache.
-// The minimum size is 1024.
-// cleanerInterval specifies the interval that MemCache scans
-// and discards expired values. If cleanerInterval <= 0, a default
-// interval will be used.
 func NewMemCache(size int, cleanerInterval time.Duration) *MemCache {
 	sizePerShard := size / shardSize
 	if sizePerShard < 16 {
@@ -68,7 +42,6 @@ func (c *MemCache) isClosed() bool {
 	return atomic.LoadUint32(&c.closed) != 0
 }
 
-// Close closes the cache and its cleaner.
 func (c *MemCache) Close() error {
 	if atomic.CompareAndSwapUint32(&c.closed, 0, 1) {
 		close(c.closeCleanerChan)
@@ -82,10 +55,8 @@ func (c *MemCache) Get(key string) (v []byte, storedTime, expirationTime time.Ti
 	}
 
 	if e, ok := c.lru.Get(key); ok {
-		return e.v, e.storedTime, e.expirationTime
+		return e.v, time.Unix(e.st, 0), time.Unix(e.ex, 0)
 	}
-
-	// no such key
 	return nil, time.Time{}, time.Time{}
 }
 
@@ -94,21 +65,15 @@ func (c *MemCache) Store(key string, v []byte, storedTime, expirationTime time.T
 		return
 	}
 
-	now := time.Now()
-	if now.After(expirationTime) {
-		return
-	}
-
 	buf := make([]byte, len(v))
 	copy(buf, v)
 
 	e := &elem{
-		v:              buf,
-		storedTime:     storedTime,
-		expirationTime: expirationTime,
+		v:  buf,
+		st: storedTime.Unix(),
+		ex: expirationTime.Unix(),
 	}
 	c.lru.Add(key, e)
-	return
 }
 
 func (c *MemCache) startCleaner(interval time.Duration) {
@@ -127,10 +92,12 @@ func (c *MemCache) startCleaner(interval time.Duration) {
 	}
 }
 
-func (c *MemCache) cleanFunc() func(_ string, v *elem) bool {
-	now := time.Now()
-	return func(_ string, v *elem) bool {
-		return v.expirationTime.Before(now)
+func (c *MemCache) cleanFunc() func(_ string, e *elem) bool {
+	// Lấy mốc Unix hiện tại một lần cho mỗi lượt quét
+	nowUnix := time.Now().Unix()
+	return func(_ string, e *elem) bool {
+		// Xóa ngay khi chạm mốc hoặc vượt quá expiration time
+		return e.ex <= nowUnix
 	}
 }
 
