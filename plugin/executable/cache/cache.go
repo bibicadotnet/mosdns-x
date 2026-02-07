@@ -318,7 +318,8 @@ func (c *cachePlugin) store(key string, r *dns.Msg) error {
 	if ttl == 0 {
 		return nil
 	}
-
+	
+	r.Compress = true
 	raw, err := r.Pack()
 	if err != nil {
 		return err
