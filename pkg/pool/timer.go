@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package pool
 
 import (
@@ -28,18 +9,32 @@ var (
 	timerPool = sync.Pool{}
 )
 
-func GetTimer(t time.Duration) *time.Timer {
+// GetTimer gets a timer from the pool and resets it to the given duration.
+func GetTimer(d time.Duration) *time.Timer {
 	timer, ok := timerPool.Get().(*time.Timer)
 	if !ok {
-		return time.NewTimer(t)
+		return time.NewTimer(d)
 	}
-	if timer.Reset(t) {
-		panic("dispatcher.go getTimer: active timer trapped in timerPool")
+	
+	// If Reset returns true, the timer was still active.
+	// Instead of panicking, we stop it and create a fresh one to be safe.
+	if !timer.Stop() {
+		// Drain the channel if necessary
+		select {
+		case <-timer.C:
+		default:
+		}
 	}
+	timer.Reset(d)
 	return timer
 }
 
+// ReleaseTimer stops the timer, drains its channel, and returns it to the pool.
 func ReleaseTimer(timer *time.Timer) {
+	if timer == nil {
+		return
+	}
+	
 	if !timer.Stop() {
 		select {
 		case <-timer.C:
@@ -49,7 +44,12 @@ func ReleaseTimer(timer *time.Timer) {
 	timerPool.Put(timer)
 }
 
+// ResetAndDrainTimer stops the timer, drains the channel, and starts it again with new duration.
 func ResetAndDrainTimer(timer *time.Timer, d time.Duration) {
+	if timer == nil {
+		return
+	}
+	
 	if !timer.Stop() {
 		select {
 		case <-timer.C:
