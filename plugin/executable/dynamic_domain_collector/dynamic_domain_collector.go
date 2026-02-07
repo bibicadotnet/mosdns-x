@@ -17,7 +17,7 @@ import (
 const PluginType = "dynamic_domain_collector"
 
 type Args struct {
-	FileName string `yaml:"file_name"`
+	FileName string `yaml:"file"`
 }
 
 type Collector struct {
