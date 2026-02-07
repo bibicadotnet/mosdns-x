@@ -31,6 +31,7 @@ const packBufSize = 4096
 // PackBuffer packs the dns msg m to wire format.
 // Callers should release the buf after they have done with the wire []byte.
 func PackBuffer(m *dns.Msg) (wire []byte, buf *Buffer, err error) {
+	m.Compress = true
 	buf = GetBuf(packBufSize)
 	wire, err = m.PackBuffer(buf.Bytes())
 	if err != nil {
