@@ -90,12 +90,6 @@ func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next ex
 	newMsg := new(dns.Msg)
 	newMsg.SetReply(r) // Copies header flags (QR, Opcode, RD, RA, etc.)
 	newMsg.Compress = true // MUST be set BEFORE adding records
-	
-	// Preserve important flags that SetReply() might not copy
-	newMsg.AuthenticData = r.AuthenticData     // DNSSEC validation status
-	newMsg.AuthorizedAnswer = r.AuthorizedAnswer // Authoritative response flag
-	newMsg.RecursionAvailable = r.RecursionAvailable
-	newMsg.CheckingDisabled = r.CheckingDisabled
 
 	// 8. Filter CNAME records and rebuild Answer section with optimized record creation
 	for _, rr := range r.Answer {
