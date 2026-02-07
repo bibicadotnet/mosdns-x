@@ -1,3 +1,9 @@
+/*
+ * Copyright (C) 2020-2022, IrineSistiana
+ *
+ * This file is part of mosdns.
+ */
+
 package no_cname
 
 import (
@@ -22,6 +28,8 @@ type noCNAME struct {
 	*coremain.BP
 }
 
+// Exec strips CNAME records from DNS responses and flattens all Answer records
+// to match the original query name.
 func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	if err := executable_seq.ExecChainNode(ctx, qCtx, next); err != nil {
 		return err
@@ -32,11 +40,13 @@ func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next ex
 		return nil
 	}
 
+	// Only process A/AAAA queries
 	qType := r.Question[0].Qtype
 	if qType != dns.TypeA && qType != dns.TypeAAAA {
 		return nil
 	}
 
+	// Check if response has IP and CNAME records
 	hasIP := false
 	hasCNAME := false
 	for _, rr := range r.Answer {
@@ -55,18 +65,22 @@ func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next ex
 		return nil
 	}
 
+	// Strip Extra to reduce message size
 	r.Extra = nil
 
+	// Skip processing if no CNAME (optimization)
 	if !hasCNAME {
 		return nil
 	}
 
+	// Filter: keep only A/AAAA, rewrite name
 	qName := r.Question[0].Name
 	filtered := make([]dns.RR, 0, len(r.Answer))
 
 	for _, rr := range r.Answer {
 		rt := rr.Header().Rrtype
 		
+		// ONLY keep A/AAAA records
 		if rt != dns.TypeA && rt != dns.TypeAAAA {
 			continue
 		}
@@ -77,18 +91,5 @@ func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next ex
 	}
 
 	r.Answer = filtered
-	r.Compress = true
-
-	packed, err := r.Pack()
-	if err != nil {
-		return nil
-	}
-
-	compressed := new(dns.Msg)
-	if err := compressed.Unpack(packed); err != nil {
-		return nil
-	}
-
-	qCtx.SetResponse(compressed)
 	return nil
 }
