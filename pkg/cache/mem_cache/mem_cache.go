@@ -7,49 +7,47 @@ import (
 	"github.com/pmkol/mosdns-x/pkg/concurrent_lru"
 )
 
-const (
-	shardSize              = 64
-	defaultCleanerInterval = time.Minute
-)
-
+// MemCache is a size-bounded, high-performance passive LRU store.
+// 
+// LIFECYCLE MANAGEMENT:
+// 1. Physical Eviction (RAM): Managed strictly by LRU capacity (Size). 
+//    Memory usage will grow until it reaches the configured limit and stay there. 
+//    This is INTENTIONAL behavior to maximize speed, not a memory leak.
+// 2. Logical Expiration (TTL): Enforced by the upper cache plugin logic 
+//    (e.g., plugin/executable/cache) using the 7-byte fast-path header.
+//
+// DO NOT add background timers or "cleaners" here. This design avoids 
+// CPU spikes and GC pressure by being entirely passive.
 type MemCache struct {
-	closed           uint32
-	closeCleanerChan chan struct{}
-	lru              *concurrent_lru.ShardedLRU[*elem]
+	closed uint32
+	lru    *concurrent_lru.ShardedLRU[*elem]
 }
 
 type elem struct {
 	v  []byte // slice header (24B)
 	st int64  // storedTime.Unix() (8B)
-	ex int64  // expirationTime.Unix() (8B) - Bao gồm cả Lazy TTL
+	ex int64  // expirationTime.Unix() (8B)
 }
 
-func NewMemCache(size int, cleanerInterval time.Duration) *MemCache {
-	sizePerShard := size / shardSize
+// NewMemCache creates a passive storage backend.
+// The cleanerInterval argument is ignored as eviction is strictly size-based.
+func NewMemCache(size int, _ time.Duration) *MemCache {
+	sizePerShard := size / 64
 	if sizePerShard < 16 {
 		sizePerShard = 16
 	}
 
-	c := &MemCache{
-		closeCleanerChan: make(chan struct{}),
-		lru:              concurrent_lru.NewShardedLRU[*elem](shardSize, sizePerShard, nil),
+	return &MemCache{
+		lru: concurrent_lru.NewShardedLRU[*elem](64, sizePerShard, nil),
 	}
-	go c.startCleaner(cleanerInterval)
-	return c
 }
 
 func (c *MemCache) isClosed() bool {
 	return atomic.LoadUint32(&c.closed) != 0
 }
 
-func (c *MemCache) Close() error {
-	if atomic.CompareAndSwapUint32(&c.closed, 0, 1) {
-		close(c.closeCleanerChan)
-	}
-	return nil
-}
-
-func (c *MemCache) Get(key string) (v []byte, storedTime, expirationTime time.Time) {
+// Get retrieves an entry. The caller MUST validate TTL/Expiration.
+func (c *MemCache) Get(key string) ([]byte, time.Time, time.Time) {
 	if c.isClosed() {
 		return nil, time.Time{}, time.Time{}
 	}
@@ -60,45 +58,25 @@ func (c *MemCache) Get(key string) (v []byte, storedTime, expirationTime time.Ti
 	return nil, time.Time{}, time.Time{}
 }
 
-func (c *MemCache) Store(key string, v []byte, storedTime, expirationTime time.Time) {
+func (c *MemCache) Store(key string, v []byte, st, ex time.Time) {
 	if c.isClosed() {
 		return
 	}
 
+	// Data is copied to ensure immutability within the cache.
 	buf := make([]byte, len(v))
 	copy(buf, v)
 
-	e := &elem{
+	c.lru.Add(key, &elem{
 		v:  buf,
-		st: storedTime.Unix(),
-		ex: expirationTime.Unix(),
-	}
-	c.lru.Add(key, e)
+		st: st.Unix(),
+		ex: ex.Unix(),
+	})
 }
 
-func (c *MemCache) startCleaner(interval time.Duration) {
-	if interval <= 0 {
-		interval = defaultCleanerInterval
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-c.closeCleanerChan:
-			return
-		case <-ticker.C:
-			c.lru.Clean(c.cleanFunc())
-		}
-	}
-}
-
-func (c *MemCache) cleanFunc() func(_ string, e *elem) bool {
-	// Lấy mốc Unix hiện tại một lần cho mỗi lượt quét
-	nowUnix := time.Now().Unix()
-	return func(_ string, e *elem) bool {
-		// Xóa ngay khi chạm mốc hoặc vượt quá expiration time
-		return e.ex <= nowUnix
-	}
+func (c *MemCache) Close() error {
+	atomic.StoreUint32(&c.closed, 1)
+	return nil
 }
 
 func (c *MemCache) Len() int {
