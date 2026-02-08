@@ -40,7 +40,8 @@ type Args struct {
 	CacheEverything   bool   `yaml:"cache_everything"`
 	CompressResp      bool   `yaml:"compress_resp"`
 	WhenHit           string `yaml:"when_hit"`
-	CleanerInterval   int    `yaml:"cleaner_interval"`
+	// Use pointer to distinguish between "not set" (nil) and "set to 0" (0)
+	CleanerInterval   *int   `yaml:"cleaner_interval"`
 }
 
 type cachePlugin struct {
@@ -80,7 +81,17 @@ func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
 			return nil, err
 		}
 	} else {
-		interval := time.Duration(a.CleanerInterval) * time.Second
+		// Logic: Default to 60s if not set (nil). If set to 0, it stays 0 (disabled).
+		cleanerSec := 60
+		if a.CleanerInterval != nil {
+			cleanerSec = *a.CleanerInterval
+		}
+
+		var interval time.Duration
+		if cleanerSec > 0 {
+			interval = time.Duration(cleanerSec) * time.Second
+		}
+
 		backend = mem_cache.NewMemCache(a.Size, interval)
 	}
 
