@@ -114,7 +114,7 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 		m := bp.M().GetExecutables()
 		whenHit = m[tag]
 		if whenHit == nil {
-			return nil, fmt.Errorf("cannot find exectable %s", tag)
+			return nil, fmt.Errorf("cannot find executable %s", tag)
 		}
 	}
 
@@ -191,15 +191,10 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 }
 
 func (c *cachePlugin) getMsgKey(q *dns.Msg) (string, error) {
-	isSimpleQuery := len(q.Question) == 1 && len(q.Answer) == 0 && len(q.Ns) == 0 && len(q.Extra) == 0
-	if isSimpleQuery || c.args.CacheEverything {
-		msgKey, err := dnsutils.GetMsgKey(q, 0)
-		if err != nil {
-			return "", fmt.Errorf("failed to unpack query msg, %w", err)
-		}
-		return msgKey, nil
-	}
-	return "", nil
+    if len(q.Question) != 1 {
+        return "", nil
+    }
+    return dnsutils.GetMsgKey(q, 0, c.args.CacheEverything)
 }
 
 func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err error) {
