@@ -189,50 +189,53 @@ func GetMsgKey(m *dns.Msg, salt uint16, cacheEverything bool) (string, error) {
 
 	q := m.Question[0]
 
-	// Cache key: salt (2 bytes) + domain + qtype (2 bytes) + qclass (2 bytes)
+	// Cache key core: salt (2 bytes) + domain + qtype (2 bytes) + qclass (2 bytes)
 	writeUint16(b, salt)
 	b.WriteString(q.Name)
 	writeUint16(b, q.Qtype)
 	writeUint16(b, q.Qclass)
 
+	// EARLY RETURN - Hot path for shared cache
+	// Skip all EDNS/ECS processing if not required
+	if !cacheEverything {
+		return b.String(), nil
+	}
+
 	// Process ECS (EDNS Client Subnet) with masking for cache sharing
-	if cacheEverything {
-		// Find OPT record in Extra section
-		var opt *dns.OPT
-		for _, extra := range m.Extra {
-			if o, ok := extra.(*dns.OPT); ok {
-				opt = o
-				break
-			}
+	var opt *dns.OPT
+	for _, extra := range m.Extra {
+		if o, ok := extra.(*dns.OPT); ok {
+			opt = o
+			break
 		}
+	}
 
-		// If OPT exists, look for ECS option inside it
-		if opt != nil {
-			for _, s := range opt.Option {
-				if ecs, ok := s.(*dns.EDNS0_SUBNET); ok {
-					if ecs.SourceNetmask > 0 {
-						writeUint16(b, ecs.Family)
-						b.WriteByte(ecs.SourceNetmask)
-						validBytes := int((ecs.SourceNetmask + 7) / 8)
+	// If OPT exists, look for ECS option inside it
+	if opt != nil {
+		for _, s := range opt.Option {
+			if ecs, ok := s.(*dns.EDNS0_SUBNET); ok {
+				if ecs.SourceNetmask > 0 {
+					writeUint16(b, ecs.Family)
+					b.WriteByte(ecs.SourceNetmask)
+					validBytes := int((ecs.SourceNetmask + 7) / 8)
 
-						if validBytes > len(ecs.Address) {
-							validBytes = len(ecs.Address)
-						}
-
-						for i := 0; i < validBytes; i++ {
-							val := ecs.Address[i]
-							// Apply subnet mask to the last byte for cache sharing
-							if i == validBytes-1 {
-								if remainder := ecs.SourceNetmask % 8; remainder != 0 {
-									mask := byte(0xFF << (8 - remainder))
-									val &= mask
-								}
-							}
-							b.WriteByte(val)
-						}
+					if validBytes > len(ecs.Address) {
+						validBytes = len(ecs.Address)
 					}
-					break // Successfully processed the ECS option, exit loop
+
+					for i := 0; i < validBytes; i++ {
+						val := ecs.Address[i]
+						// Apply subnet mask to the last byte for cache sharing
+						if i == validBytes-1 {
+							if remainder := ecs.SourceNetmask % 8; remainder != 0 {
+								mask := byte(0xFF << (8 - remainder))
+								val &= mask
+							}
+						}
+						b.WriteByte(val)
+					}
 				}
+				break // Successfully processed the ECS option, exit loop
 			}
 		}
 	}
