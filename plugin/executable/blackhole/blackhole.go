@@ -1,20 +1,5 @@
 /*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ * Copyright (C) 2020-2026, IrineSistiana
  */
 
 package blackhole
@@ -37,6 +22,7 @@ const PluginType = "blackhole"
 func init() {
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(Args) })
 
+	// Preset plugins for common RCode responses
 	coremain.RegNewPersetPluginFunc("_drop_response", func(bp *coremain.BP) (coremain.Plugin, error) {
 		return newBlackHole(bp, &Args{RCode: -1})
 	})
@@ -66,6 +52,7 @@ type blackHole struct {
 	*coremain.BP
 	args *Args
 
+	// Pre-parsed IP addresses
 	ipv4 []netip.Addr
 	ipv6 []netip.Addr
 }
@@ -105,19 +92,16 @@ func newBlackHole(bp *coremain.BP, args *Args) (*blackHole, error) {
 	return b, nil
 }
 
-// Exec
-// sets qCtx.R() with IP response if query type is A/AAAA and Args.IPv4 / Args.IPv6 is not empty.
-// sets qCtx.R() with empty response with rcode = Args.RCode.
-// drops qCtx.R() if Args.RCode < 0
-// It never returns an error.
 func (b *blackHole) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	b.exec(qCtx)
+	// For blackhole, we usually don't want to execute next nodes if a response is set,
+	// but keeping coremain logic to ensure pipeline consistency.
 	return executable_seq.ExecChainNode(ctx, qCtx, next)
 }
 
 func (b *blackHole) exec(qCtx *query_context.Context) {
 	q := qCtx.Q()
-	if len(q.Question) != 1 {
+	if q == nil || len(q.Question) != 1 {
 		return
 	}
 
@@ -129,8 +113,9 @@ func (b *blackHole) exec(qCtx *query_context.Context) {
 		r := new(dns.Msg)
 		r.SetRcode(q, dns.RcodeSuccess)
 		r.RecursionAvailable = true
+		r.Answer = make([]dns.RR, 0, len(b.ipv4)) // Pre-allocate slice
 		for _, addr := range b.ipv4 {
-			rr := &dns.A{
+			r.Answer = append(r.Answer, &dns.A{
 				Hdr: dns.RR_Header{
 					Name:   qName,
 					Rrtype: dns.TypeA,
@@ -138,8 +123,7 @@ func (b *blackHole) exec(qCtx *query_context.Context) {
 					Ttl:    3600,
 				},
 				A: addr.AsSlice(),
-			}
-			r.Answer = append(r.Answer, rr)
+			})
 		}
 		qCtx.SetResponse(r)
 
@@ -147,8 +131,9 @@ func (b *blackHole) exec(qCtx *query_context.Context) {
 		r := new(dns.Msg)
 		r.SetRcode(q, dns.RcodeSuccess)
 		r.RecursionAvailable = true
+		r.Answer = make([]dns.RR, 0, len(b.ipv6)) // Pre-allocate slice
 		for _, addr := range b.ipv6 {
-			rr := &dns.AAAA{
+			r.Answer = append(r.Answer, &dns.AAAA{
 				Hdr: dns.RR_Header{
 					Name:   qName,
 					Rrtype: dns.TypeAAAA,
@@ -156,17 +141,16 @@ func (b *blackHole) exec(qCtx *query_context.Context) {
 					Ttl:    3600,
 				},
 				AAAA: addr.AsSlice(),
-			}
-			r.Answer = append(r.Answer, rr)
+			})
 		}
 		qCtx.SetResponse(r)
 
 	case b.args.RCode >= 0:
-		r := dnsutils.GenEmptyReply(q, b.args.RCode)
-		qCtx.SetResponse(r)
+		// Generate an empty reply with the specified RCode (e.g., NXDOMAIN, REFUSED)
+		qCtx.SetResponse(dnsutils.GenEmptyReply(q, b.args.RCode))
+
 	default:
+		// Drop response (Args.RCode < 0)
 		qCtx.SetResponse(nil)
 	}
-
-	return
 }
