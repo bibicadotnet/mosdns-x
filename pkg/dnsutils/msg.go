@@ -1,8 +1,20 @@
 /*
- * Copyright (C) 2020-2026, IrineSistiana
+ * Copyright (C) 2020-2022, IrineSistiana
  *
  * This file is part of mosdns.
- * Optimized for real-world production performance.
+ *
+ * mosdns is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * mosdns is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 package dnsutils
@@ -10,6 +22,7 @@ package dnsutils
 import (
 	"encoding/binary"
 	"strconv"
+	"strings"
 
 	"github.com/miekg/dns"
 
@@ -17,8 +30,8 @@ import (
 	"github.com/pmkol/mosdns-x/pkg/utils"
 )
 
-// GetMinimalTTL returns the minimal TTL of this DNS message.
-// If the message has no records, it returns 0.
+// GetMinimalTTL returns the minimal ttl of this msg.
+// If msg m has no record, it returns 0.
 func GetMinimalTTL(m *dns.Msg) uint32 {
 	minTTL := ^uint32(0)
 	hasRecord := false
@@ -26,7 +39,7 @@ func GetMinimalTTL(m *dns.Msg) uint32 {
 		for _, rr := range section {
 			hdr := rr.Header()
 			if hdr.Rrtype == dns.TypeOPT {
-				continue // OPT record TTL is not a real TTL.
+				continue // opt record ttl is not ttl.
 			}
 			hasRecord = true
 			ttl := hdr.Ttl
@@ -36,19 +49,19 @@ func GetMinimalTTL(m *dns.Msg) uint32 {
 		}
 	}
 
-	if !hasRecord {
+	if !hasRecord { // no ttl applied
 		return 0
 	}
 	return minTTL
 }
 
-// SetTTL updates the TTL of all records in the message to the specified value, excluding OPT records.
+// SetTTL updates all records' ttl to ttl, except opt record.
 func SetTTL(m *dns.Msg, ttl uint32) {
 	for _, section := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
 		for _, rr := range section {
 			hdr := rr.Header()
 			if hdr.Rrtype == dns.TypeOPT {
-				continue
+				continue // opt record ttl is not ttl.
 			}
 			hdr.Ttl = ttl
 		}
@@ -63,14 +76,15 @@ func ApplyMinimalTTL(m *dns.Msg, ttl uint32) {
 	applyTTL(m, ttl, false)
 }
 
-// SubtractTTL subtracts delta from every record's TTL.
-// Returns overflowed = true if any TTL becomes smaller than delta.
+// SubtractTTL subtract delta from every m's RR.
+// If RR's TTL is smaller than delta, SubtractTTL
+// will return overflowed = true.
 func SubtractTTL(m *dns.Msg, delta uint32) (overflowed bool) {
 	for _, section := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
 		for _, rr := range section {
 			hdr := rr.Header()
 			if hdr.Rrtype == dns.TypeOPT {
-				continue
+				continue // opt record ttl is not ttl.
 			}
 			if ttl := hdr.Ttl; ttl > delta {
 				hdr.Ttl = ttl - delta
@@ -88,7 +102,7 @@ func applyTTL(m *dns.Msg, ttl uint32, maximum bool) {
 		for _, rr := range section {
 			hdr := rr.Header()
 			if hdr.Rrtype == dns.TypeOPT {
-				continue
+				continue // opt record ttl is not ttl.
 			}
 			if maximum {
 				if hdr.Ttl > ttl {
@@ -118,14 +132,13 @@ func QtypeToString(u uint16) string {
 	return uint16Conv(u, dns.TypeToString)
 }
 
-// GenEmptyReply generates an empty DNS reply with the specified Rcode.
 func GenEmptyReply(q *dns.Msg, rcode int) *dns.Msg {
 	r := new(dns.Msg)
 	r.SetRcode(q, rcode)
 	r.RecursionAvailable = true
 
 	var name string
-	if len(q.Question) > 0 {
+	if len(q.Question) > 1 {
 		name = q.Question[0].Name
 	} else {
 		name = "."
@@ -135,14 +148,13 @@ func GenEmptyReply(q *dns.Msg, rcode int) *dns.Msg {
 	return r
 }
 
-// FakeSOA returns a dummy SOA record for empty replies.
 func FakeSOA(name string) *dns.SOA {
 	return &dns.SOA{
 		Hdr: dns.RR_Header{
-			Name:    name,
-			Rrtype:  dns.TypeSOA,
-			Class:   dns.ClassINET,
-			Ttl:     300,
+			Name:   name,
+			Rrtype: dns.TypeSOA,
+			Class:  dns.ClassINET,
+			Ttl:    300,
 		},
 		Ns:      "fake-ns.mosdns.fake.root.",
 		Mbox:    "fake-mbox.mosdns.fake.root.",
@@ -155,22 +167,17 @@ func FakeSOA(name string) *dns.SOA {
 }
 
 // GetMsgKey unpacks m and set its id to salt.
-// This is the most efficient method for long-lived cache keys: 1 allocation, zero-copy string.
 func GetMsgKey(m *dns.Msg, salt uint16) (string, error) {
 	wireMsg, err := m.Pack()
 	if err != nil {
 		return "", err
 	}
-	// In-place modification of the ID field with the provided salt
 	wireMsg[0] = byte(salt >> 8)
 	wireMsg[1] = byte(salt)
-
-	// Safe zero-copy because wireMsg is unique to this caller and won't be reused.
 	return utils.BytesToStringUnsafe(wireMsg), nil
 }
 
-// GetMsgKeyWithBytesSalt appends a byte slice salt to the packed message key.
-// Uses direct make() and copy() for better performance and predictable GC behavior.
+// GetMsgKeyWithBytesSalt unpacks m and appends salt to the string.
 func GetMsgKeyWithBytesSalt(m *dns.Msg, salt []byte) (string, error) {
 	wireMsg, buf, err := pool.PackBuffer(m)
 	if err != nil {
@@ -178,22 +185,20 @@ func GetMsgKeyWithBytesSalt(m *dns.Msg, salt []byte) (string, error) {
 	}
 	defer buf.Release()
 
-	// Mask ID to 0 for consistent key generation
 	wireMsg[0] = 0
 	wireMsg[1] = 0
 
-	// Combine into a single allocation
-	result := make([]byte, len(wireMsg)+len(salt))
-	copy(result, wireMsg)
-	copy(result[len(wireMsg):], salt)
+	sb := new(strings.Builder)
+	sb.Grow(len(wireMsg) + len(salt))
+	sb.Write(wireMsg)
+	sb.Write(salt)
 
-	// string() is required here as pooled buffer is released.
-	return string(result), nil
+	return sb.String(), nil
 }
 
-// GetMsgKeyWithInt64Salt appends an int64 salt using stack allocation for the salt buffer.
+// GetMsgKeyWithInt64Salt unpacks m and appends salt to the string.
 func GetMsgKeyWithInt64Salt(m *dns.Msg, salt int64) (string, error) {
-	var b [8]byte // Stack allocated to prevent heap escape
-	binary.BigEndian.PutUint64(b[:], uint64(salt))
-	return GetMsgKeyWithBytesSalt(m, b[:])
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, uint64(salt))
+	return GetMsgKeyWithBytesSalt(m, b)
 }
