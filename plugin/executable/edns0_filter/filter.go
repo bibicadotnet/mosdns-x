@@ -70,7 +70,7 @@ func NewFilter(bp *coremain.BP, args *Args) *Filter {
 			return nil
 		}
 		m := make(map[uint16]struct{})
-		for _, option := range args.Keep {
+		for _, option := range opts { // FIXED: Use the correct variable `opts` instead of `args.Keep`.
 			m[option] = struct{}{}
 		}
 		return m
