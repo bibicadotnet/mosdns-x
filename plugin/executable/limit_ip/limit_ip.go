@@ -28,7 +28,7 @@ type limitIPPlugin struct {
 func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
 	cfg := args.(*Args)
 	limit := cfg.Limit
-	// Default limit to 3 if not specified or invalid.
+	// Default limit to 2 if not specified or invalid.
 	if limit <= 0 {
 		limit = 2
 	}
