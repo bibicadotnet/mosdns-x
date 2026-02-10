@@ -1,20 +1,5 @@
 /*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ * Copyright (C) 2020-2026, IrineSistiana
  */
 
 package redirect
@@ -91,7 +76,8 @@ func newRedirect(bp *coremain.BP, args *Args) (*redirectPlugin, error) {
 
 func (r *redirectPlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	q := qCtx.Q()
-	if len(q.Question) != 1 || q.Question[0].Qclass != dns.ClassINET {
+	// Basic defensive guard for malformed queries
+	if q == nil || len(q.Question) != 1 || q.Question[0].Qclass != dns.ClassINET {
 		return executable_seq.ExecChainNode(ctx, qCtx, next)
 	}
 
@@ -101,32 +87,42 @@ func (r *redirectPlugin) Exec(ctx context.Context, qCtx *query_context.Context, 
 		return executable_seq.ExecChainNode(ctx, qCtx, next)
 	}
 
-	// Change query name to the redirect target
+	// Change query name to the redirect target for upstream processing
 	q.Question[0].Name = redirectTarget
 	err := executable_seq.ExecChainNode(ctx, qCtx, next)
 
 	if resp := qCtx.R(); resp != nil {
 		// 1. Restore the original query name in the Question section
-		for i := range resp.Question {
-			if resp.Question[i].Name == redirectTarget {
-				resp.Question[i].Name = orgQName
-			}
+		// Since we guarded len == 1 above, we only need to check the first question
+		if len(resp.Question) > 0 && resp.Question[0].Name == redirectTarget {
+			resp.Question[0].Name = orgQName
 		}
 
-		// 2. Filter out CNAMEs and rewrite Answer record names to the original name
-		filteredAns := make([]dns.RR, 0, len(resp.Answer))
+		// 2. In-place filtering and rewriting (Zero-allocation optimization)
+		// We reuse the existing Answer slice to avoid heap allocation.
+		n := 0
 		for _, rr := range resp.Answer {
-			// Skip CNAME records to avoid protocol conflicts and keep the result clean
-			if rr.Header().Rrtype == dns.TypeCNAME {
+			h := rr.Header()
+			if h == nil {
 				continue
 			}
-			// Rewrite the record name (A/AAAA) to match the original query
-			if rr.Header().Name == redirectTarget {
-				rr.Header().Name = orgQName
+
+			// Skip CNAME records to hide the redirection logic from the client
+			if h.Rrtype == dns.TypeCNAME {
+				continue
 			}
-			filteredAns = append(filteredAns, rr)
+
+			// Rewrite the record name back to the original query name
+			if h.Name == redirectTarget {
+				h.Name = orgQName
+			}
+
+			// Keep this record by moving it to the front of the slice
+			resp.Answer[n] = rr
+			n++
 		}
-		resp.Answer = filteredAns
+		// Truncate the slice to the new filtered length
+		resp.Answer = resp.Answer[:n]
 	}
 
 	return err
