@@ -120,7 +120,6 @@ func newPlugin(bp *coremain.BP, args *Args) (p *ecsPlugin, err error) {
 	return ep, nil
 }
 
-// Exec tries to append ECS to qCtx.Q().
 func (e *ecsPlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	upgraded, newECS := e.addECS(qCtx)
 	err := executable_seq.ExecChainNode(ctx, qCtx, next)
@@ -140,16 +139,11 @@ func (e *ecsPlugin) Exec(ctx context.Context, qCtx *query_context.Context, next 
 	return nil
 }
 
-// addECS adds a *dns.EDNS0_SUBNET record to q.
-// upgraded: Whether the addECS upgraded the q to a EDNS0 enabled query.
-// newECS: Whether the addECS added a *dns.EDNS0_SUBNET to q that didn't
-// have a *dns.EDNS0_SUBNET before.
 func (e *ecsPlugin) addECS(qCtx *query_context.Context) (upgraded bool, newECS bool) {
 	q := qCtx.Q()
 	opt := q.IsEdns0()
 	hasECS := opt != nil && dnsutils.GetECS(opt) != nil
 	if hasECS && !e.args.ForceOverwrite {
-		// Argument args.ForceOverwrite is disabled. q already has an edns0 subnet. Skip it.
 		return false, false
 	}
 
@@ -160,28 +154,39 @@ func (e *ecsPlugin) addECS(qCtx *query_context.Context) (upgraded bool, newECS b
 			return false, false
 		}
 
-		switch {
-		case clientAddr.Is4():
-			ecs = dnsutils.NewEDNS0Subnet(clientAddr.AsSlice(), uint8(e.args.Mask4), false)
-		case clientAddr.Is4In6():
-			ecs = dnsutils.NewEDNS0Subnet(clientAddr.Unmap().AsSlice(), uint8(e.args.Mask4), false)
-		case clientAddr.Is6():
-			ecs = dnsutils.NewEDNS0Subnet(clientAddr.AsSlice(), uint8(e.args.Mask6), true)
+		var prefix netip.Prefix
+		if clientAddr.Is4() || clientAddr.Is4In6() {
+			prefix = netip.PrefixFrom(clientAddr.Unmap(), e.args.Mask4)
+		} else {
+			prefix = netip.PrefixFrom(clientAddr, e.args.Mask6)
 		}
+
+		maskedIP := prefix.Masked().Addr()
+		isV6 := maskedIP.Is6() && !maskedIP.Is4In6()
+		ecs = dnsutils.NewEDNS0Subnet(maskedIP.AsSlice(), uint8(prefix.Bits()), isV6)
+
 	} else { // use preset ip
 		switch {
 		case checkQueryType(q, dns.TypeA):
 			if e.ipv4.IsValid() {
-				ecs = dnsutils.NewEDNS0Subnet(e.ipv4.AsSlice(), uint8(e.args.Mask4), false)
+				prefix := netip.PrefixFrom(e.ipv4, e.args.Mask4)
+				maskedIP := prefix.Masked().Addr()
+				ecs = dnsutils.NewEDNS0Subnet(maskedIP.AsSlice(), uint8(e.args.Mask4), false)
 			} else if e.ipv6.IsValid() {
-				ecs = dnsutils.NewEDNS0Subnet(e.ipv6.AsSlice(), uint8(e.args.Mask6), true)
+				prefix := netip.PrefixFrom(e.ipv6, e.args.Mask6)
+				maskedIP := prefix.Masked().Addr()
+				ecs = dnsutils.NewEDNS0Subnet(maskedIP.AsSlice(), uint8(e.args.Mask6), true)
 			}
 
 		case checkQueryType(q, dns.TypeAAAA):
 			if e.ipv6.IsValid() {
-				ecs = dnsutils.NewEDNS0Subnet(e.ipv6.AsSlice(), uint8(e.args.Mask6), true)
+				prefix := netip.PrefixFrom(e.ipv6, e.args.Mask6)
+				maskedIP := prefix.Masked().Addr()
+				ecs = dnsutils.NewEDNS0Subnet(maskedIP.AsSlice(), uint8(e.args.Mask6), true)
 			} else if e.ipv4.IsValid() {
-				ecs = dnsutils.NewEDNS0Subnet(e.ipv4.AsSlice(), uint8(e.args.Mask4), false)
+				prefix := netip.PrefixFrom(e.ipv4, e.args.Mask4)
+				maskedIP := prefix.Masked().Addr()
+				ecs = dnsutils.NewEDNS0Subnet(maskedIP.AsSlice(), uint8(e.args.Mask4), false)
 			}
 		}
 	}
