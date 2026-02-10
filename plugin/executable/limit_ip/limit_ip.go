@@ -8,8 +8,6 @@ import (
 	"context"
 	"math/rand/v2" // Go 1.22+ Fast, Zero-lock, per-P random source.
 
-	"github.com/miekg/dns"
-
 	"github.com/pmkol/mosdns-x/coremain"
 	"github.com/pmkol/mosdns-x/pkg/executable_seq"
 	"github.com/pmkol/mosdns-x/pkg/query_context"
