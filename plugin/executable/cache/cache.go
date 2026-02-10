@@ -194,7 +194,7 @@ func (c *cachePlugin) getMsgKey(q *dns.Msg) (string, error) {
     if len(q.Question) != 1 {
         return "", nil
     }
-    return dnsutils.GetMsgKey(q, 0, c.args.CacheEverything)
+    return dnsutils.GetMsgKey(q, 0)
 }
 
 func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err error) {
