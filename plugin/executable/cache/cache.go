@@ -26,12 +26,25 @@ const (
 	PluginType = "cache"
 )
 
+var (
+	// markLazyUpdate dùng để đánh dấu context của luồng cập nhật ngầm
+	markLazyUpdate uint
+)
+
 func init() {
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(Args) })
 
 	coremain.RegNewPersetPluginFunc("_default_cache", func(bp *coremain.BP) (coremain.Plugin, error) {
 		return newCachePlugin(bp, &Args{})
 	})
+
+	// Cấp phát Mark duy nhất cho plugin cache
+	var err error
+	markLazyUpdate, err = query_context.AllocateMark()
+	if err != nil {
+		// Nếu không cấp phát được mark thì không thể chạy lazy update an toàn
+		panic(fmt.Sprintf("failed to allocate cache mark: %v", err))
+	}
 }
 
 const (
@@ -148,6 +161,24 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 }
 
 func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
+	// 1. Bypass logic cho Phase 0: Nếu đã có response từ plugin trước, thoát sớm.
+	if qCtx.R() != nil {
+		return nil
+	}
+
+	// 2. NHẬN DIỆN LUỒNG LAZY: Nếu context có mark của mình, skip lookup để đi thẳng ra Upstream lấy hàng mới.
+	if qCtx.HasMark(markLazyUpdate) {
+		err := executable_seq.ExecChainNode(ctx, qCtx, next)
+		r := qCtx.R()
+		if r != nil {
+			msgKey, _ := c.getMsgKey(qCtx.Q())
+			if len(msgKey) > 0 {
+				_ = c.tryStoreMsg(msgKey, r)
+			}
+		}
+		return err
+	}
+
 	c.queryTotal.Inc()
 	q := qCtx.Q()
 
@@ -159,17 +190,25 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 		return executable_seq.ExecChainNode(ctx, qCtx, next)
 	}
 
+	// Phase 0 / Lookup logic
 	cachedResp, lazyHit, err := c.lookupCache(msgKey)
 	if err != nil {
 		c.L().Error("lookup cache", qCtx.InfoField(), zap.Error(err))
 	}
-	if lazyHit {
-		c.lazyHitTotal.Inc()
-		c.doLazyUpdate(msgKey, qCtx, next)
-	}
-	if cachedResp != nil { // cache hit
+
+	if cachedResp != nil {
+		if lazyHit {
+			c.lazyHitTotal.Inc()
+			// Expired: Trả kết quả cũ và kích hoạt luồng cập nhật ngầm.
+			cachedResp.Id = q.Id
+			qCtx.SetResponse(cachedResp)
+			c.doLazyUpdate(msgKey, qCtx, next)
+			return nil
+		}
+
+		// Valid HIT: Trả kết quả và ngắt pipeline (Bypass Phase 1-4).
 		c.hitTotal.Inc()
-		cachedResp.Id = q.Id // change msg id
+		cachedResp.Id = q.Id
 		c.L().Debug("cache hit", qCtx.InfoField())
 		qCtx.SetResponse(cachedResp)
 		if c.whenHit != nil {
@@ -178,7 +217,7 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 		return nil
 	}
 
-	// cache miss, run the entry and try to store its response.
+	// Cache miss: Chạy tiếp pipeline.
 	c.L().Debug("cache miss", qCtx.InfoField())
 	err = executable_seq.ExecChainNode(ctx, qCtx, next)
 	r := qCtx.R()
@@ -191,28 +230,15 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 }
 
 func (c *cachePlugin) getMsgKey(q *dns.Msg) (string, error) {
-	// Only cache standard DNS queries with exactly one question.
-	// Multi-question or malformed queries are intentionally ignored.
 	if len(q.Question) != 1 {
 		return "", nil
 	}
-
-	// Cache behavior is controlled by the upstream pipeline, not by branching here:
-	// - To behave like cache_everything = false:
-	//   place '_edns0_filter_no_edns0' before the cache plugin.
-	// - To behave like cache_everything = true (cache by ECS):
-	//   place the 'ecs' plugin (with normalized subnets) before the cache plugin.
-	//
-	// At this stage, the DNS message is already normalized and safe to serialize
-	// directly as a binary cache key.
 	return dnsutils.GetMsgKey(q, 0)
 }
 
 func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err error) {
-	// lookup in cache
 	v, storedTime, _ := c.backend.Get(msgKey)
 
-	// cache hit
 	if v != nil {
 		if c.args.CompressResp {
 			decodeLen, err := snappy.DecodedLen(v)
@@ -250,20 +276,22 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 			return r, false, nil
 		}
 
-		// expired but lazy update enabled
+		// Expired but lazy update enabled
 		if c.args.LazyCacheTTL > 0 {
-			// set the default ttl
 			dnsutils.SetTTL(r, uint32(c.args.LazyCacheReplyTTL))
 			return r, true, nil
 		}
 	}
 
-	// cache miss
 	return nil, false, nil
 }
 
 func (c *cachePlugin) doLazyUpdate(msgKey string, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
 	lazyQCtx := qCtx.Copy()
+	// Tẩy tủy và Dán nhãn để đi xuyên qua chính mình ở Phase 4
+	lazyQCtx.SetResponse(nil)
+	lazyQCtx.AddMark(markLazyUpdate)
+
 	lazyUpdateFunc := func() (interface{}, error) {
 		c.L().Debug("start lazy cache update", lazyQCtx.InfoField())
 		defer c.lazyUpdateSF.Forget(msgKey)
