@@ -191,28 +191,14 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 }
 
 func (c *cachePlugin) getMsgKey(q *dns.Msg) (string, error) {
-	// Only cache standard DNS queries with exactly one question.
-	// Multi-question or malformed queries are intentionally ignored.
 	if len(q.Question) != 1 {
 		return "", nil
 	}
-
-	// Cache behavior is controlled by the upstream pipeline, not by branching here:
-	// - To behave like cache_everything = false:
-	//   place '_edns0_filter_no_edns0' before the cache plugin.
-	// - To behave like cache_everything = true (cache by ECS):
-	//   place the 'ecs' plugin (with normalized subnets) before the cache plugin.
-	//
-	// At this stage, the DNS message is already normalized and safe to serialize
-	// directly as a binary cache key.
 	return dnsutils.GetMsgKey(q, 0)
 }
 
 func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err error) {
-	// lookup in cache
 	v, storedTime, _ := c.backend.Get(msgKey)
-
-	// cache hit
 	if v != nil {
 		if c.args.CompressResp {
 			decodeLen, err := snappy.DecodedLen(v)
@@ -250,15 +236,11 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 			return r, false, nil
 		}
 
-		// expired but lazy update enabled
 		if c.args.LazyCacheTTL > 0 {
-			// set the default ttl
 			dnsutils.SetTTL(r, uint32(c.args.LazyCacheReplyTTL))
 			return r, true, nil
 		}
 	}
-
-	// cache miss
 	return nil, false, nil
 }
 
@@ -288,13 +270,32 @@ func (c *cachePlugin) doLazyUpdate(msgKey string, qCtx *query_context.Context, n
 }
 
 func (c *cachePlugin) tryStoreMsg(key string, r *dns.Msg) error {
-	if (r.Rcode != dns.RcodeSuccess && r.Rcode != dns.RcodeNameError) || r.Truncated != false {
+	if (r.Rcode != dns.RcodeSuccess && r.Rcode != dns.RcodeNameError) || r.Truncated {
 		return nil
 	}
 
-	v, err := r.Pack()
-	if err != nil {
-		return fmt.Errorf("failed to pack response msg, %w", err)
+	var v []byte
+	if c.args.CompressResp {
+		// Use pooled buffer for temporary packing to eliminate heap allocation from r.Pack()
+		wireMsg, buf, err := pool.PackBuffer(r)
+		if err != nil {
+			return fmt.Errorf("failed to pack response msg, %w", err)
+		}
+		
+		// Direct heap allocation for the compressed result to ensure data safety
+		// in asynchronous backends (e.g., Redis).
+		compressed := make([]byte, snappy.MaxEncodedLen(len(wireMsg)))
+		v = snappy.Encode(compressed, wireMsg)
+		
+		// Immediately release pooled buffer after compression
+		buf.Release()
+	} else {
+		// No compression: standard Pack() creates its own owned slice, which is safe.
+		var err error
+		v, err = r.Pack()
+		if err != nil {
+			return fmt.Errorf("failed to pack response msg, %w", err)
+		}
 	}
 
 	now := time.Now()
@@ -308,11 +309,7 @@ func (c *cachePlugin) tryStoreMsg(key string, r *dns.Msg) error {
 		}
 		expirationTime = now.Add(time.Duration(minTTL) * time.Second)
 	}
-	if c.args.CompressResp {
-		compressBuf := pool.GetBuf(snappy.MaxEncodedLen(len(v)))
-		v = snappy.Encode(compressBuf.Bytes(), v)
-		defer compressBuf.Release()
-	}
+
 	c.backend.Store(key, v, now, expirationTime)
 	return nil
 }
