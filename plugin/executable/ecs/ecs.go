@@ -161,20 +161,44 @@ func (e *ecsPlugin) addECS(qCtx *query_context.Context) (upgraded bool, newECS b
 	return false, false
 }
 
+// genECS generates an ECS record with extreme performance.
+// It uses a stack-allocated buffer for bit-masking to avoid heap allocations
+// during the processing phase.
 func (e *ecsPlugin) genECS(addr netip.Addr) *dns.EDNS0_SUBNET {
 	var mask int
+	var isV6 bool
+	var buf [16]byte // Stack buffer: 0ns allocation
+	var n int
+
 	if addr.Is4() || addr.Is4In6() {
 		mask = e.args.Mask4
-		addr = addr.Unmap()
+		isV6 = false
+		a4 := addr.Unmap().As4()
+		n = copy(buf[:], a4[:])
 	} else {
 		mask = e.args.Mask6
+		isV6 = true
+		a16 := addr.As16()
+		n = copy(buf[:], a16[:])
 	}
 
-	prefix := netip.PrefixFrom(addr, mask)
-	maskedAddr := prefix.Masked().Addr()
-	isV6 := maskedAddr.Is6() && !maskedAddr.Is4In6()
-	
-	return dnsutils.NewEDNS0Subnet(maskedAddr.AsSlice(), uint8(mask), isV6)
+	// Fast Bit-masking: Clean dirty bits after the subnet mask.
+	// This ensures cache-key consistency (Normalization).
+	fullBytes := mask / 8
+	if fullBytes < n {
+		if rem := mask % 8; rem > 0 {
+			buf[fullBytes] &= byte(0xFF << (8 - rem))
+			fullBytes++
+		}
+		// Zero out tailing bytes using a fast loop.
+		for i := fullBytes; i < n; i++ {
+			buf[i] = 0
+		}
+	}
+
+	// Pass the temporary stack slice to NewEDNS0Subnet.
+	// NewEDNS0Subnet is responsible for making a safe heap copy.
+	return dnsutils.NewEDNS0Subnet(buf[:n], uint8(mask), isV6)
 }
 
 type noECS struct {
