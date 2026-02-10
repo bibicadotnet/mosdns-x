@@ -6,7 +6,7 @@ package limit_ip
 
 import (
 	"context"
-	"math/rand/v2" // ✅ Go 1.22+ Fast, Zero-lock, per-P random source.
+	"math/rand/v2" // Go 1.22+ Fast, Zero-lock, per-P random source.
 
 	"github.com/miekg/dns"
 
