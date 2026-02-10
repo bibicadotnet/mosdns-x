@@ -8,6 +8,7 @@ package no_cname
 
 import (
 	"context"
+
 	"github.com/miekg/dns"
 	"github.com/pmkol/mosdns-x/coremain"
 	"github.com/pmkol/mosdns-x/pkg/executable_seq"
@@ -28,68 +29,62 @@ type noCNAME struct {
 	*coremain.BP
 }
 
-// Exec strips CNAME records from DNS responses and flattens all Answer records
-// to match the original query name.
+// Exec strips CNAME records and flattens responses for A/AAAA queries.
+// Optimized for maximum performance: zero-allocation, in-place mutation.
 func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	if err := executable_seq.ExecChainNode(ctx, qCtx, next); err != nil {
 		return err
 	}
 
 	r := qCtx.R()
-	if r == nil || len(r.Question) == 0 || len(r.Answer) == 0 {
+	// Early exit: if response is nil or Answer is empty, no flattening required.
+	if r == nil || len(r.Answer) == 0 {
 		return nil
 	}
 
-	// Only process A/AAAA queries
-	qType := r.Question[0].Qtype
-	if qType != dns.TypeA && qType != dns.TypeAAAA {
+	// Hot-path optimization: Only process A/AAAA queries.
+	// Other types like HTTPS (65) or SRV (33) are returned as-is to prevent semantic breakage.
+	q := r.Question[0]
+	if q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA {
 		return nil
 	}
 
-	// Check if response has IP and CNAME records
+	ans := r.Answer
+	qName := q.Name
+	writeIdx := 0
 	hasIP := false
-	hasCNAME := false
-	for _, rr := range r.Answer {
+
+	// --- SINGLE PASS IN-PLACE FLATTENING ---
+	// Iterate once to filter and rewrite names simultaneously.
+	// Avoids dns.Copy() by mutating the RR Header Name pointer directly (Zero-allocation).
+	for i := 0; i < len(ans); i++ {
+		rr := ans[i]
 		rt := rr.Header().Rrtype
+
 		if rt == dns.TypeA || rt == dns.TypeAAAA {
 			hasIP = true
-		} else if rt == dns.TypeCNAME {
-			hasCNAME = true
-		}
-		if hasIP && hasCNAME {
-			break
+			
+			// In-place name rewrite. Pointer assignment is extremely cheap.
+			rr.Header().Name = qName
+			
+			ans[writeIdx] = rr
+			writeIdx++
 		}
 	}
 
+	// If no IP records found (e.g., CNAME pointing to non-IP types),
+	// return original response to maintain client-side logic.
 	if !hasIP {
 		return nil
 	}
 
-	// Strip Extra to reduce message size
+	// Truncate Answer slice in-place to avoid new slice allocation.
+	r.Answer = ans[:writeIdx]
+
+	// --- ULTRA FAST EXTRA CLEANUP ---
+	// Since this plugin resides at the end of the pipeline, OPT (EDNS0) is no longer needed.
+	// Assigning nil is a 0ns operation to wipe the Extra section.
 	r.Extra = nil
 
-	// Skip processing if no CNAME (optimization)
-	if !hasCNAME {
-		return nil
-	}
-
-	// Filter: keep only A/AAAA, rewrite name
-	qName := r.Question[0].Name
-	filtered := make([]dns.RR, 0, len(r.Answer))
-
-	for _, rr := range r.Answer {
-		rt := rr.Header().Rrtype
-		
-		// ONLY keep A/AAAA records
-		if rt != dns.TypeA && rt != dns.TypeAAAA {
-			continue
-		}
-
-		newRR := dns.Copy(rr)
-		newRR.Header().Name = qName
-		filtered = append(filtered, newRR)
-	}
-
-	r.Answer = filtered
 	return nil
 }
