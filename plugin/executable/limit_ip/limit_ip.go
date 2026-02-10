@@ -1,12 +1,9 @@
-/*
- * Copyright (C) 2020-2026, IrineSistiana
- */
-
 package limit_ip
 
 import (
 	"context"
-	"math/rand/v2" // Go 1.22+ Fast, Zero-lock, per-P random source.
+	"math/rand/v2"
+	"strings"
 
 	"github.com/pmkol/mosdns-x/coremain"
 	"github.com/pmkol/mosdns-x/pkg/executable_seq"
@@ -14,6 +11,16 @@ import (
 )
 
 const PluginType = "limit_ip"
+
+// Pre-defined suffixes to avoid heap allocation in hot-path.
+var githubSuffixes = []string{
+	"github.com.",
+	"github.io.",
+	"githubusercontent.com.",
+	"githubassets.com.",
+	"githubcopilot.com.",
+	"github-cloud.s3.amazonaws.com.",
+}
 
 func init() {
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} {
@@ -34,7 +41,7 @@ func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
 	cfg := args.(*Args)
 	limit := cfg.Limit
 	if limit <= 0 {
-		limit = 3
+		limit = 2
 	}
 	return &limitIPPlugin{
 		BP:    bp,
@@ -43,39 +50,53 @@ func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
 }
 
 func (p *limitIPPlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
-	// 1. Upstream execution
+	// 1. Upstream execution first.
 	if err := executable_seq.ExecChainNode(ctx, qCtx, next); err != nil {
 		return err
 	}
 
+	// 2. DEFENSIVE GUARD: Exit if no response or empty answer.
 	r := qCtx.R()
-	// 2. Minimal Branching: Exit fast if no work is needed.
-	if r == nil || len(r.Answer) <= 2 {	// Skip if 0, 1, or 2 IPs
+	if r == nil || len(r.Answer) == 0 {
 		return nil
 	}
 
-	// --- ULTRA FAST PATH (ZERO-ALLOC, LOCK-FREE) ---
-	//
-	// CRITICAL INVARIANT:
-	// - r.Answer MUST contain ONLY homogeneous IP RRset (all A or all AAAA).
-	// - Non-IP records (CNAME, etc.) or mixed RRsets MUST be filtered by upstream.
-	// - This assumption is required for zero-branch correctness and peak performance.
-	//
-	// Violating this invariant WILL lead to incorrect response semantics (e.g. truncated CNAMEs).
-	
+	// 3. QUESTION GUARD: Avoid panic on malformed queries or reordered pipelines.
+	q := qCtx.Q()
+	if q == nil || len(q.Question) == 0 {
+		return nil
+	}
+
 	ans := r.Answer
 	n := len(ans)
+	qName := strings.ToLower(q.Question[0].Name)
 
-	// 3. In-place Shuffle: 
-	// Uses math/rand/v2 global source which is optimized for concurrency.
-	// Cost: ~5-10ns.
-	rand.Shuffle(n, func(i, j int) {
-		ans[i], ans[j] = ans[j], ans[i]
-	})
+	// 4. FQDN NORMALIZATION: Ensure trailing dot for reliable suffix matching.
+	if !strings.HasSuffix(qName, ".") {
+		qName += "."
+	}
 
-	// 4. In-place Truncation:
-	// Direct slice manipulation, zero memory movement.
-	// Cost: ~1ns.
+	// 5. TARGETED SHUFFLE: Strictly for GitHub ecosystem.
+	// We only shuffle if n > 1 to avoid wasted cycles.
+	// For Cloudflare (n=2) or others, we keep upstream order to PROTECT DNS CACHE.
+	if n > 1 {
+		isGitHub := false
+		for _, suffix := range githubSuffixes {
+			if strings.HasSuffix(qName, suffix) {
+				isGitHub = true
+				break
+			}
+		}
+
+		if isGitHub {
+			rand.Shuffle(n, func(i, j int) {
+				ans[i], ans[j] = ans[j], ans[i]
+			})
+		}
+	}
+
+	// 6. IN-PLACE TRUNCATION: Always apply limit.
+	// Preserves original upstream order if not GitHub.
 	if n > p.limit {
 		r.Answer = ans[:p.limit]
 	}
