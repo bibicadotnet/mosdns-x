@@ -191,10 +191,21 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 }
 
 func (c *cachePlugin) getMsgKey(q *dns.Msg) (string, error) {
-    if len(q.Question) != 1 {
-        return "", nil
-    }
-    return dnsutils.GetMsgKey(q, 0)
+	// Only cache standard DNS queries with exactly one question.
+	// Multi-question or malformed queries are intentionally ignored.
+	if len(q.Question) != 1 {
+		return "", nil
+	}
+
+	// Cache behavior is controlled by the upstream pipeline, not by branching here:
+	// - To behave like cache_everything = false:
+	//   place '_edns0_filter_no_edns0' before the cache plugin.
+	// - To behave like cache_everything = true (cache by ECS):
+	//   place the 'ecs' plugin (with normalized subnets) before the cache plugin.
+	//
+	// At this stage, the DNS message is already normalized and safe to serialize
+	// directly as a binary cache key.
+	return dnsutils.GetMsgKey(q, 0)
 }
 
 func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err error) {
