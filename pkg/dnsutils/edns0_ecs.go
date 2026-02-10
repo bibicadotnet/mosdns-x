@@ -78,23 +78,18 @@ func AddECS(opt *dns.OPT, ecs *dns.EDNS0_SUBNET, overwrite bool) (newECS bool) {
 
 func NewEDNS0Subnet(ip net.IP, mask uint8, v6 bool) *dns.EDNS0_SUBNET {
 	edns0Subnet := new(dns.EDNS0_SUBNET)
-	// edns family: https://www.iana.org/assignments/address-family-numbers/address-family-numbers.xhtml
-	// ipv4 = 1
-	// ipv6 = 2
-	if !v6 { // ipv4
+	if !v6 {
 		edns0Subnet.Family = 1
-	} else { // ipv6
+	} else {
 		edns0Subnet.Family = 2
 	}
 
 	edns0Subnet.SourceNetmask = mask
 	edns0Subnet.Code = dns.EDNS0SUBNET
-	edns0Subnet.Address = ip
 
-	// SCOPE PREFIX-LENGTH, an unsigned octet representing the leftmost
-	// number of significant bits of ADDRESS that the response covers.
-	// In queries, it MUST be set to 0.
-	// https://tools.ietf.org/html/rfc7871
+	edns0Subnet.Address = make(net.IP, len(ip))
+	copy(edns0Subnet.Address, ip)
+
 	edns0Subnet.SourceScope = 0
 	return edns0Subnet
 }
