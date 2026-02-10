@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package misc_optm
 
 import (
@@ -32,10 +13,7 @@ import (
 
 const (
 	PluginType = "misc_optm"
-)
-
-const (
-	maxUDPSize = 1232 // 1280 (min ipv6 mtu) - 40 (ipv6 header) - 8 (udp header)
+	maxUDPSize = 1232
 )
 
 func init() {
@@ -52,8 +30,10 @@ type optm struct {
 
 func (t *optm) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	q := qCtx.Q()
+	// Trust the architecture: qCtx.Q() is guaranteed by the entry point.
+	// If q is nil, panic here is better than a delayed crash elsewhere.
 
-	// Block query that is unusual.
+	// 1. Filter out unusual queries early to minimize processing.
 	if isUnusualQuery(q) {
 		r := new(dns.Msg)
 		r.SetRcode(q, dns.RcodeRefused)
@@ -61,39 +41,47 @@ func (t *optm) Exec(ctx context.Context, qCtx *query_context.Context, next execu
 		return nil
 	}
 
-	// limit edns0 udp size.
-	if opt := q.IsEdns0(); opt != nil {
-		if opt.UDPSize() > maxUDPSize {
-			opt.SetUDPSize(maxUDPSize)
-		}
+	// 2. Request side: Fix EDNS0 UDP size to prevent fragmentation.
+	// Combined checks into a single 'if' for slightly cleaner flow.
+	if opt := q.IsEdns0(); opt != nil && opt.UDPSize() > maxUDPSize {
+		opt.SetUDPSize(maxUDPSize)
 	}
 
+	// EXECUTION BOUNDARY: Handover to downstream plugins (Cache, Forwarder, etc.)
 	if err := executable_seq.ExecChainNode(ctx, qCtx, next); err != nil {
 		return err
 	}
 
+	// 3. Response side: Cleanup and Consistency
 	r := qCtx.R()
 	if r == nil {
 		return nil
 	}
 
-	// Remove padding
+	// Always remove Padding from response to minimize packet size.
 	if rOpt := r.IsEdns0(); rOpt != nil {
 		dnsutils.RemoveEDNS0Option(rOpt, dns.EDNS0PADDING)
 	}
 
-	// EDNS0 consistency
-	if qOpt := q.IsEdns0(); qOpt == nil {
+	// Ensure EDNS0 consistency: Response must not have EDNS0 if the request doesn't.
+	// q.IsEdns0() must be re-checked here as downstream plugins might have mutated it.
+	if q.IsEdns0() == nil {
 		dnsutils.RemoveEDNS0(r)
 	}
+
 	return nil
 }
 
+// isUnusualQuery is inlined manually to reduce function call overhead in the hot path.
 func isUnusualQuery(q *dns.Msg) bool {
-	return !isValidQuery(q) || len(q.Question) != 1 || q.Question[0].Qclass != dns.ClassINET
-}
-
-func isValidQuery(q *dns.Msg) bool {
-	return !q.Response && q.Opcode == dns.OpcodeQuery && !q.Authoritative && !q.Zero && // check header
-		len(q.Answer) == 0 && len(q.Ns) == 0 // check body
+	// Standard Query Header Checks
+	if q.Response || q.Opcode != dns.OpcodeQuery || q.Authoritative || q.Zero {
+		return true
+	}
+	// Body Structure Checks: Must have 1 Question (INET) and no Answer/Authority sections.
+	if len(q.Question) != 1 || q.Question[0].Qclass != dns.ClassINET ||
+		len(q.Answer) != 0 || len(q.Ns) != 0 {
+		return true
+	}
+	return false
 }
