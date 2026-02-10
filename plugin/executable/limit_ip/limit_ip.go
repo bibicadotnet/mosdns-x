@@ -50,7 +50,7 @@ func (p *limitIPPlugin) Exec(ctx context.Context, qCtx *query_context.Context, n
 
 	r := qCtx.R()
 	// 2. Minimal Branching: Exit fast if no work is needed.
-	if r == nil || len(r.Answer) <= 1 {
+	if r == nil || len(r.Answer) <= 2 {	// Skip if 0, 1, or 2 IPs
 		return nil
 	}
 
