@@ -1,20 +1,5 @@
 /*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ * Copyright (C) 2020-2026, IrineSistiana
  */
 
 package ttl
@@ -22,51 +7,67 @@ package ttl
 import (
 	"context"
 
+	"github.com/miekg/dns"
 	"github.com/pmkol/mosdns-x/coremain"
-	"github.com/pmkol/mosdns-x/pkg/dnsutils"
 	"github.com/pmkol/mosdns-x/pkg/executable_seq"
 	"github.com/pmkol/mosdns-x/pkg/query_context"
 )
 
-const (
-	PluginType = "ttl"
-)
+const PluginType = "ttl"
 
 func init() {
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(Args) })
 }
-
-var _ coremain.ExecutablePlugin = (*ttl)(nil)
 
 type Args struct {
 	MaximumTTL uint32 `yaml:"maximum_ttl"`
 	MinimalTTL uint32 `yaml:"minimal_ttl"`
 }
 
-type ttl struct {
+type ttlPlugin struct {
 	*coremain.BP
-	args *Args
+	max uint32
+	min uint32
 }
 
-func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
-	return newTTL(bp, args.(*Args)), nil
+func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
+	a := args.(*Args)
+	return &ttlPlugin{
+		BP:  bp,
+		max: a.MaximumTTL,
+		min: a.MinimalTTL,
+	}, nil
 }
 
-func newTTL(bp *coremain.BP, args *Args) coremain.Plugin {
-	return &ttl{
-		BP:   bp,
-		args: args,
+func (t *ttlPlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
+	r := qCtx.R()
+	
+	// Fast Path: If no response or no TTL constraints, move to next plugin immediately.
+	if r == nil || (t.max == 0 && t.min == 0) {
+		return executable_seq.ExecChainNode(ctx, qCtx, next)
 	}
-}
 
-func (t *ttl) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
-	if r := qCtx.R(); r != nil {
-		if t.args.MaximumTTL > 0 {
-			dnsutils.ApplyMaximumTTL(r, t.args.MaximumTTL)
-		}
-		if t.args.MinimalTTL > 0 {
-			dnsutils.ApplyMinimalTTL(r, t.args.MinimalTTL)
+	// SINGLE-PASS OPTIMIZATION: 
+	// Instead of calling dnsutils helpers twice (which loops twice), 
+	// we iterate through all RR sections in a single pass.
+	
+	// Helper to process a slice of RRs
+	processRRs := func(rrs []dns.RR) {
+		for _, rr := range rrs {
+			if h := rr.Header(); h != nil {
+				if t.max > 0 && h.Ttl > t.max {
+					h.Ttl = t.max
+				}
+				if t.min > 0 && h.Ttl < t.min {
+					h.Ttl = t.min
+				}
+			}
 		}
 	}
+
+	processRRs(r.Answer)
+	processRRs(r.Ns)
+	processRRs(r.Extra)
+
 	return executable_seq.ExecChainNode(ctx, qCtx, next)
 }
