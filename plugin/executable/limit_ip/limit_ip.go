@@ -30,7 +30,7 @@ func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
 	limit := cfg.Limit
 	// Default limit to 3 if not specified or invalid.
 	if limit <= 0 {
-		limit = 3
+		limit = 2
 	}
 	return &limitIPPlugin{
 		BP:    bp,
