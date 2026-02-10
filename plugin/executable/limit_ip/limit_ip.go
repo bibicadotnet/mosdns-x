@@ -38,6 +38,16 @@ func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
 	}, nil
 }
 
+// Exec limits the number of IP records in the DNS answer.
+//
+// PIPELINE ORDER WARNING:
+// To maintain maximum performance (~1ns) and avoid logic errors (like truncating CNAME chains),
+// this plugin SHOULD be placed AFTER:
+// 1. '_no_cname' (CNAME flattening)
+// 2. IPv6/IPv4 filters (if any)
+//
+// This ensures the Answer section contains only pure IP records of the desired type.
+
 func (p *limitIPPlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	// 1. Upstream execution.
 	if err := executable_seq.ExecChainNode(ctx, qCtx, next); err != nil {
