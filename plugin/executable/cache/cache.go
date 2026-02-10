@@ -241,9 +241,12 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 			msgTTL = time.Duration(dnsutils.GetMinimalTTL(r)) * time.Second
 		}
 
-		// not expired
-		if storedTime.Add(msgTTL).After(time.Now()) {
-			dnsutils.SubtractTTL(r, uint32(time.Since(storedTime).Seconds()))
+		now := time.Now()
+		elapsed := now.Sub(storedTime)
+		if storedTime.Add(msgTTL).After(now) {
+			if elapsed > 0 {
+				dnsutils.SubtractTTL(r, uint32(elapsed.Seconds()))
+			}
 			return r, false, nil
 		}
 
