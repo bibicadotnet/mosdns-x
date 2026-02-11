@@ -1,12 +1,8 @@
-/*
- * Copyright (C) 2020-2026, IrineSistiana
- * Optimized by: bibica
- */
-
 package dnsutils
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -22,9 +18,9 @@ var builderPool = sync.Pool{
 	},
 }
 
-// GetMsgKey tạo key định danh nhị phân (Không ID, không Salt).
-// Tối ưu cho IPv6 và Domain dài với buffer 80 bytes.
-func GetMsgKey(m *dns.Msg) string {
+// GetMsgKey tạo key định danh nhị phân (Không dùng ID/Salt để tối ưu Cache).
+// Nhận salt uint16 để giữ tương thích với plugin cache hiện tại nhưng không băm vào key.
+func GetMsgKey(m *dns.Msg, salt uint16) (string, error) {
 	b := builderPool.Get().(*strings.Builder)
 	b.Reset()
 	defer builderPool.Put(b)
@@ -47,7 +43,7 @@ func GetMsgKey(m *dns.Msg) string {
 		}
 	}
 
-	return b.String()
+	return b.String(), nil
 }
 
 func writeUint16(b *strings.Builder, v uint16) {
@@ -55,39 +51,58 @@ func writeUint16(b *strings.Builder, v uint16) {
 	b.WriteByte(byte(v))
 }
 
-// --- Các hàm Helper phục vụ package khác (KHÔNG ĐƯỢC XÓA) ---
+// --- Các hàm Helper phục vụ package khác ---
 
-// QtypeToString chuyển đổi mã Type sang chuỗi (Phục vụ query_context)
-func QtypeToString(qType uint16) string {
-	if s, ok := dns.TypeToString[qType]; ok {
-		return s
-	}
-	return fmt.Sprintf("TYPE%d", qType)
+func QclassToString(u uint16) string {
+	return uint16Conv(u, dns.ClassToString)
 }
 
-// QclassToString chuyển đổi mã Class sang chuỗi (Phục vụ query_context)
-func QclassToString(qClass uint16) string {
-	if s, ok := dns.ClassToString[qClass]; ok {
-		return s
-	}
-	return fmt.Sprintf("CLASS%d", qClass)
+func QtypeToString(u uint16) string {
+	return uint16Conv(u, dns.TypeToString)
 }
 
-// FakeSOA tạo bản ghi SOA giả (Phục vụ pkg/hosts)
+func uint16Conv(u uint16, m map[uint16]string) string {
+	if s, ok := m[u]; ok {
+		return s
+	}
+	return strconv.Itoa(int(u))
+}
+
+func GenEmptyReply(q *dns.Msg, rcode int) *dns.Msg {
+	r := new(dns.Msg)
+	r.SetRcode(q, rcode)
+	r.RecursionAvailable = true
+
+	var name string
+	if len(q.Question) > 0 {
+		name = q.Question[0].Name
+	} else {
+		name = "."
+	}
+
+	r.Ns = []dns.RR{FakeSOA(name)}
+	return r
+}
+
 func FakeSOA(name string) *dns.SOA {
 	return &dns.SOA{
-		Hdr:     dns.RR_Header{Name: name, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 60},
-		Ns:      "fake-ns.",
-		Mbox:    "fake-mbox.",
-		Serial:  0,
-		Refresh: 28800,
-		Retry:   7200,
+		Hdr: dns.RR_Header{
+			Name:   name,
+			Rrtype: dns.TypeSOA,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		Ns:      "fake-ns.mosdns.fake.root.",
+		Mbox:    "fake-mbox.mosdns.fake.root.",
+		Serial:  2021110400,
+		Refresh: 1800,
+		Retry:   900,
 		Expire:  604800,
-		Minttl:  60,
+		Minttl:  86400,
 	}
 }
 
-// --- Logic quản lý TTL cho Cache ---
+// --- Logic quản lý TTL ---
 
 func GetMinimalTTL(m *dns.Msg) uint32 {
 	minTTL := ^uint32(0)
@@ -121,6 +136,34 @@ func SetTTL(m *dns.Msg, ttl uint32) {
 	}
 }
 
+func ApplyMaximumTTL(m *dns.Msg, ttl uint32) {
+	applyTTL(m, ttl, true)
+}
+
+func ApplyMinimalTTL(m *dns.Msg, ttl uint32) {
+	applyTTL(m, ttl, false)
+}
+
+func applyTTL(m *dns.Msg, ttl uint32, maximum bool) {
+	for _, section := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
+		for _, rr := range section {
+			hdr := rr.Header()
+			if hdr.Rrtype == dns.TypeOPT {
+				continue
+			}
+			if maximum {
+				if hdr.Ttl > ttl {
+					hdr.Ttl = ttl
+				}
+			} else {
+				if hdr.Ttl < ttl {
+					hdr.Ttl = ttl
+				}
+			}
+		}
+	}
+}
+
 func SubtractTTL(m *dns.Msg, delta uint32) (overflowed bool) {
 	for _, section := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
 		for _, rr := range section {
@@ -128,8 +171,8 @@ func SubtractTTL(m *dns.Msg, delta uint32) (overflowed bool) {
 			if hdr.Rrtype == dns.TypeOPT {
 				continue
 			}
-			if hdr.Ttl > delta {
-				hdr.Ttl -= delta
+			if ttl := hdr.Ttl; ttl > delta {
+				hdr.Ttl = ttl - delta
 			} else {
 				hdr.Ttl = 1
 				overflowed = true
