@@ -24,12 +24,6 @@ import (
 	"time"
 )
 
-// Backend represents a cache backend.
-// The Backend does not raise errors cause a cache error is not a
-// fatal error to a dns query. The caller usually does not care too
-// much about the cache error. Implements should handle errors themselves.
-// Cache Backend is expected to be very fast. All operations should be
-// done (or returned) in a short time. e.g. 50 ms.
 type Backend interface {
 	// Get retrieves v from Backend. The returned v may be the original value. The caller should
 	// not modify it.
