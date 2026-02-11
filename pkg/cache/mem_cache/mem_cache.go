@@ -12,8 +12,6 @@ const (
 	defaultCleanerInterval = time.Minute
 )
 
-// MemCache is a simple LRU cache that stores values in memory.
-// It is safe for concurrent use.
 type MemCache struct {
 	closed           uint32
 	closeCleanerChan chan struct{}
@@ -22,13 +20,11 @@ type MemCache struct {
 
 type elem struct {
 	packet     []byte
-	storedTime int64 // Unix second - Cần thiết để tính Subtract TTL
-	expire     int64 // Unix nano - Actual DNS record TTL
-	lazyExpire int64 // Unix nano - expire + lazy_cache_ttl
+	storedTime int64 // Unix second - dùng để tính Subtract TTL
+	expire     int64 // Unix nano - mốc hết hạn thực tế
+	lazyExpire int64 // Unix nano - mốc hết hạn sau khi cộng thêm Lazy TTL
 }
 
-// NewMemCache initializes a MemCache.
-// cleanerInterval <= 0 disables the background cleaner (passive mode).
 func NewMemCache(size int, cleanerInterval time.Duration) *MemCache {
 	sizePerShard := size / shardSize
 	if sizePerShard < 16 {
@@ -39,11 +35,9 @@ func NewMemCache(size int, cleanerInterval time.Duration) *MemCache {
 		lru:              concurrent_lru.NewShardedLRU[*elem](shardSize, sizePerShard, nil),
 	}
 
-	// Optional cleaner
 	if cleanerInterval > 0 {
 		go c.startCleaner(cleanerInterval)
 	}
-
 	return c
 }
 
@@ -51,7 +45,6 @@ func (c *MemCache) isClosed() bool {
 	return atomic.LoadUint32(&c.closed) != 0
 }
 
-// Close closes the cache and its cleaner.
 func (c *MemCache) Close() error {
 	if atomic.CompareAndSwapUint32(&c.closed, 0, 1) {
 		close(c.closeCleanerChan)
@@ -59,7 +52,6 @@ func (c *MemCache) Close() error {
 	return nil
 }
 
-// Get returns (packet, storedTime, lazyHit, ok)
 func (c *MemCache) Get(key string) (packet []byte, storedTime int64, lazyHit bool, ok bool) {
 	if c.isClosed() {
 		return nil, 0, false, false
@@ -72,27 +64,22 @@ func (c *MemCache) Get(key string) (packet []byte, storedTime int64, lazyHit boo
 
 	now := time.Now().UnixNano()
 
-	// Fully expired (exceeds lazy window)
+	// Quá hạn hoàn toàn (vượt cả cửa sổ Lazy)
 	if now > e.lazyExpire {
 		return nil, 0, false, false
 	}
 
-	// Stale (lazy hit)
-	if now > e.expire {
-		return e.packet, e.storedTime, true, true
-	}
-
-	// Fresh hit
-	return e.packet, e.storedTime, false, true
+	// Trả về gói tin và trạng thái (Fresh hay Stale)
+	lazyHit = now > e.expire
+	return e.packet, e.storedTime, lazyHit, true
 }
 
-// Store saves packet with expire and lazyExpire timestamps (Unix nano)
 func (c *MemCache) Store(key string, packet []byte, expire, lazyExpire int64) {
 	if c.isClosed() {
 		return
 	}
 
-	// Create a dedicated copy for the cache to own
+	// Copy sang buffer mới để Backend làm chủ vùng nhớ
 	buf := make([]byte, len(packet))
 	copy(buf, packet)
 
@@ -117,7 +104,6 @@ func (c *MemCache) startCleaner(interval time.Duration) {
 			return
 		case <-ticker.C:
 			now := time.Now().UnixNano()
-			// Only evict entries that have exceeded their lazy retention window
 			c.lru.Clean(func(_ string, e *elem) bool {
 				return e.lazyExpire <= now
 			})
