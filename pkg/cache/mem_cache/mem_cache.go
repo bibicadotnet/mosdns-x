@@ -21,9 +21,9 @@ type MemCache struct {
 }
 
 type elem struct {
-	v  []byte
-	st int64 // storedTime as Unix timestamp
-	ex int64 // expirationTime as Unix timestamp
+	packet     []byte
+	expire     int64 // Unix nano - Actual DNS record TTL
+	lazyExpire int64 // Unix nano - expire + lazy_cache_ttl
 }
 
 // NewMemCache initializes a MemCache.
@@ -33,17 +33,16 @@ func NewMemCache(size int, cleanerInterval time.Duration) *MemCache {
 	if sizePerShard < 16 {
 		sizePerShard = 16
 	}
-
 	c := &MemCache{
 		closeCleanerChan: make(chan struct{}),
 		lru:              concurrent_lru.NewShardedLRU[*elem](shardSize, sizePerShard, nil),
 	}
-	
+
 	// Optional cleaner
 	if cleanerInterval > 0 {
 		go c.startCleaner(cleanerInterval)
 	}
-	
+
 	return c
 }
 
@@ -59,31 +58,51 @@ func (c *MemCache) Close() error {
 	return nil
 }
 
-func (c *MemCache) Get(key string) (v []byte, storedTime, expirationTime time.Time) {
+// Get returns (packet, lazyHit, ok)
+// - lazyHit = true: record expired but within lazy window
+// - lazyHit = false: record fresh or miss
+// Note: It returns the raw internal slice. The caller is responsible for 
+// copying the packet if modification (e.g., patching ID) is required.
+func (c *MemCache) Get(key string) (packet []byte, lazyHit bool, ok bool) {
 	if c.isClosed() {
-		return nil, time.Time{}, time.Time{}
+		return nil, false, false
 	}
 
-	if e, ok := c.lru.Get(key); ok {
-		return e.v, time.Unix(e.st, 0), time.Unix(e.ex, 0)
+	e, found := c.lru.Get(key)
+	if !found {
+		return nil, false, false
 	}
 
-	return nil, time.Time{}, time.Time{}
+	now := time.Now().UnixNano()
+
+	// Fully expired (exceeds lazy window)
+	if now > e.lazyExpire {
+		return nil, false, false
+	}
+
+	// Stale (lazy hit)
+	if now > e.expire {
+		return e.packet, true, true
+	}
+
+	// Fresh hit
+	return e.packet, false, true
 }
 
-// Store saves an entry. The caller is responsible for TTL validation.
-func (c *MemCache) Store(key string, v []byte, storedTime, expirationTime time.Time) {
+// Store saves packet with expire and lazyExpire timestamps (Unix nano)
+func (c *MemCache) Store(key string, packet []byte, expire, lazyExpire int64) {
 	if c.isClosed() {
 		return
 	}
 
-	buf := make([]byte, len(v))
-	copy(buf, v)
+	// Create a dedicated copy for the cache to own
+	buf := make([]byte, len(packet))
+	copy(buf, packet)
 
 	c.lru.Add(key, &elem{
-		v:  buf,
-		st: storedTime.Unix(),
-		ex: expirationTime.Unix(),
+		packet:     buf,
+		expire:     expire,
+		lazyExpire: lazyExpire,
 	})
 }
 
@@ -93,14 +112,16 @@ func (c *MemCache) startCleaner(interval time.Duration) {
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-c.closeCleanerChan:
 			return
 		case <-ticker.C:
-			now := time.Now().Unix()
+			now := time.Now().UnixNano()
+			// Only evict entries that have exceeded their lazy retention window
 			c.lru.Clean(func(_ string, e *elem) bool {
-				return e.ex <= now
+				return e.lazyExpire <= now
 			})
 		}
 	}
