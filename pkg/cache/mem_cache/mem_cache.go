@@ -54,29 +54,29 @@ func (c *MemCache) Close() error {
 	return nil
 }
 
-func (c *MemCache) Get(key string) (packet []byte, storedTime int64, lazyHit bool, ok bool) {
+func (c *MemCache) Get(key string) (packet []byte, storedTime int64, offsets [8]uint16, count uint8, lazyHit bool, ok bool) {
 	if c.isClosed() {
-		return nil, 0, false, false
+		return nil, 0, [8]uint16{}, 0, false, false
 	}
 
 	e, found := c.lru.Get(key)
 	if !found {
-		return nil, 0, false, false
+		return nil, 0, [8]uint16{}, 0, false, false
 	}
 
 	now := time.Now().UnixNano()
 
 	// Quá hạn hoàn toàn (vượt cả cửa sổ Lazy)
 	if now > e.lazyExpire {
-		return nil, 0, false, false
+		return nil, 0, [8]uint16{}, 0, false, false
 	}
 
-	// Trả về gói tin và trạng thái (Fresh hay Stale)
+	// Trả về gói tin và trạng thái
 	lazyHit = now > e.expire
-	return e.packet, e.storedTime, lazyHit, true
+	return e.packet, e.storedTime, e.ttlOffsets, e.ttlCount, lazyHit, true
 }
 
-func (c *MemCache) Store(key string, packet []byte, expire, lazyExpire int64) {
+func (c *MemCache) Store(key string, packet []byte, expire, lazyExpire int64, offsets [8]uint16, count uint8) {
 	if c.isClosed() {
 		return
 	}
@@ -90,6 +90,8 @@ func (c *MemCache) Store(key string, packet []byte, expire, lazyExpire int64) {
 		storedTime: time.Now().Unix(),
 		expire:     expire,
 		lazyExpire: lazyExpire,
+		ttlOffsets: offsets,
+		ttlCount:   count,
 	})
 }
 
