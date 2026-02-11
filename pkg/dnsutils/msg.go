@@ -1,37 +1,64 @@
 /*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ * Copyright (C) 2020-2026, IrineSistiana
  */
 
 package dnsutils
 
 import (
-	"encoding/binary"
-	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/miekg/dns"
-
-	"github.com/pmkol/mosdns-x/pkg/pool"
-	"github.com/pmkol/mosdns-x/pkg/utils"
 )
 
-// GetMinimalTTL returns the minimal ttl of this msg.
-// If msg m has no record, it returns 0.
+// builderPool tái sử dụng vùng nhớ để triệt tiêu GC.
+var builderPool = sync.Pool{
+	New: func() interface{} {
+		b := new(strings.Builder)
+		b.Grow(128)
+		return b
+	},
+}
+
+// GetMsgKey tạo key nhị phân từ Question và ECS.
+// Dựa trên Pipeline: edns0_filter xóa trắng -> ecs.go xây lại
+// Key không chứa ID hay Salt vì nội dung đã được chuẩn hóa duy nhất.
+func GetMsgKey(m *dns.Msg) string {
+	b := builderPool.Get().(*strings.Builder)
+	b.Reset()
+	defer builderPool.Put(b)
+
+	q := m.Question[0]
+
+	// 1. Question: Định danh nội dung câu hỏi
+	b.WriteString(q.Name)
+	writeUint16(b, q.Qtype)
+	writeUint16(b, q.Qclass)
+
+	// 2. ECS: Đục thẳng vào bản ghi duy nhất trong Extra (do ecs.go đúc)
+	if len(m.Extra) > 0 {
+		if opt, ok := m.Extra[0].(*dns.OPT); ok {
+			// Bốc thẳng Option đầu tiên, ecs.go đã đảm bảo nó là ECS sạch
+			if ecs, ok := opt.Option[0].(*dns.EDNS0_SUBNET); ok {
+				writeUint16(b, ecs.Family)
+				b.WriteByte(ecs.SourceNetmask)
+				b.Write(ecs.Address) 
+			}
+		}
+	}
+
+	return b.String()
+}
+
+// writeUint16 ghi byte nhị phân trực tiếp, CPU không tốn công parse chuỗi.
+func writeUint16(b *strings.Builder, v uint16) {
+	b.WriteByte(byte(v >> 8))
+	b.WriteByte(byte(v))
+}
+
+// --- TTL Management (Phục vụ logic Cache Hit/Stale/Lazy) ---
+
+// GetMinimalTTL lấy TTL nhỏ nhất để tính expirationTime cho MemCache.
 func GetMinimalTTL(m *dns.Msg) uint32 {
 	minTTL := ^uint32(0)
 	hasRecord := false
@@ -39,55 +66,42 @@ func GetMinimalTTL(m *dns.Msg) uint32 {
 		for _, rr := range section {
 			hdr := rr.Header()
 			if hdr.Rrtype == dns.TypeOPT {
-				continue // opt record ttl is not ttl.
+				continue
 			}
 			hasRecord = true
-			ttl := hdr.Ttl
-			if ttl < minTTL {
-				minTTL = ttl
+			if hdr.Ttl < minTTL {
+				minTTL = hdr.Ttl
 			}
 		}
 	}
-
-	if !hasRecord { // no ttl applied
+	if !hasRecord {
 		return 0
 	}
 	return minTTL
 }
 
-// SetTTL updates all records' ttl to ttl, except opt record.
+// SetTTL cập nhật toàn bộ bản ghi (dùng cho Lazy Cache reply).
 func SetTTL(m *dns.Msg, ttl uint32) {
 	for _, section := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
 		for _, rr := range section {
 			hdr := rr.Header()
-			if hdr.Rrtype == dns.TypeOPT {
-				continue // opt record ttl is not ttl.
+			if hdr.Rrtype != dns.TypeOPT {
+				hdr.Ttl = ttl
 			}
-			hdr.Ttl = ttl
 		}
 	}
 }
 
-func ApplyMaximumTTL(m *dns.Msg, ttl uint32) {
-	applyTTL(m, ttl, true)
-}
-
-func ApplyMinimalTTL(m *dns.Msg, ttl uint32) {
-	applyTTL(m, ttl, false)
-}
-
-// SubtractTTL subtract delta from every m's RR.
-// If RR's TTL is smaller than delta, SubtractTTL
-// will return overflowed = true.
+// SubtractTTL trừ TTL thực tế trước khi trả về từ Cache.
 func SubtractTTL(m *dns.Msg, delta uint32) (overflowed bool) {
 	for _, section := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
 		for _, rr := range section {
 			hdr := rr.Header()
 			if hdr.Rrtype == dns.TypeOPT {
-				continue // opt record ttl is not ttl.
+				continue
 			}
-			if ttl := hdr.Ttl; ttl > delta {
-				hdr.Ttl = ttl - delta
+			if hdr.Ttl > delta {
+				hdr.Ttl -= delta
 			} else {
 				hdr.Ttl = 1
 				overflowed = true
@@ -95,110 +109,4 @@ func SubtractTTL(m *dns.Msg, delta uint32) (overflowed bool) {
 		}
 	}
 	return
-}
-
-func applyTTL(m *dns.Msg, ttl uint32, maximum bool) {
-	for _, section := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
-		for _, rr := range section {
-			hdr := rr.Header()
-			if hdr.Rrtype == dns.TypeOPT {
-				continue // opt record ttl is not ttl.
-			}
-			if maximum {
-				if hdr.Ttl > ttl {
-					hdr.Ttl = ttl
-				}
-			} else {
-				if hdr.Ttl < ttl {
-					hdr.Ttl = ttl
-				}
-			}
-		}
-	}
-}
-
-func uint16Conv(u uint16, m map[uint16]string) string {
-	if s, ok := m[u]; ok {
-		return s
-	}
-	return strconv.Itoa(int(u))
-}
-
-func QclassToString(u uint16) string {
-	return uint16Conv(u, dns.ClassToString)
-}
-
-func QtypeToString(u uint16) string {
-	return uint16Conv(u, dns.TypeToString)
-}
-
-func GenEmptyReply(q *dns.Msg, rcode int) *dns.Msg {
-	r := new(dns.Msg)
-	r.SetRcode(q, rcode)
-	r.RecursionAvailable = true
-
-	var name string
-	if len(q.Question) > 1 {
-		name = q.Question[0].Name
-	} else {
-		name = "."
-	}
-
-	r.Ns = []dns.RR{FakeSOA(name)}
-	return r
-}
-
-func FakeSOA(name string) *dns.SOA {
-	return &dns.SOA{
-		Hdr: dns.RR_Header{
-			Name:   name,
-			Rrtype: dns.TypeSOA,
-			Class:  dns.ClassINET,
-			Ttl:    300,
-		},
-		Ns:      "fake-ns.mosdns.fake.root.",
-		Mbox:    "fake-mbox.mosdns.fake.root.",
-		Serial:  2021110400,
-		Refresh: 1800,
-		Retry:   900,
-		Expire:  604800,
-		Minttl:  86400,
-	}
-}
-
-// GetMsgKey unpacks m and set its id to salt.
-func GetMsgKey(m *dns.Msg, salt uint16) (string, error) {
-	wireMsg, err := m.Pack()
-	if err != nil {
-		return "", err
-	}
-	wireMsg[0] = byte(salt >> 8)
-	wireMsg[1] = byte(salt)
-	return utils.BytesToStringUnsafe(wireMsg), nil
-}
-
-// GetMsgKeyWithBytesSalt unpacks m and appends salt to the string.
-func GetMsgKeyWithBytesSalt(m *dns.Msg, salt []byte) (string, error) {
-	wireMsg, buf, err := pool.PackBuffer(m)
-	if err != nil {
-		return "", err
-	}
-	defer buf.Release()
-
-	wireMsg[0] = 0
-	wireMsg[1] = 0
-
-	sb := new(strings.Builder)
-	sb.Grow(len(wireMsg) + len(salt))
-	sb.Write(wireMsg)
-	sb.Write(salt)
-
-	return sb.String(), nil
-}
-
-// GetMsgKeyWithInt64Salt unpacks m and appends salt to the string.
-func GetMsgKeyWithInt64Salt(m *dns.Msg, salt int64) (string, error) {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, uint64(salt))
-	return GetMsgKeyWithBytesSalt(m, b)
 }
