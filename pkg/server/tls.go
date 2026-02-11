@@ -278,16 +278,23 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 		AllowEarlyData:   true,
 		MaxEarlyData:     4096,
 		NextProtos:       nextProtos,
-		
+
+		CipherSuites: []uint16{
+			eTLS.TLS_AES_128_GCM_SHA256,
+			eTLS.TLS_CHACHA20_POLY1305_SHA256,
+			eTLS.TLS_AES_256_GCM_SHA384,
+		},
+
 		CurvePreferences: []eTLS.CurveID{
 			eTLS.X25519,
 			eTLS.CurveP256,
 		},		
-		
+
 		Defaults: eTLS.Defaults{
-			AllSecureCipherSuites: true,
+			AllSecureCipherSuites: false,
 			AllSecureCurves:       false,
 		},
+
 		GetCertificate: func(chi *eTLS.ClientHelloInfo) (*eTLS.Certificate, error) {
 			cert := c.get()
 			if cert == nil {
