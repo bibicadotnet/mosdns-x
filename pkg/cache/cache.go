@@ -16,8 +16,8 @@ type Backend interface {
 	// Store caches a DNS packet with precomputed TTL metadata.
 	// Params:
 	//   packet: raw DNS wire format
-	//   expire: Unix nano when DNS TTL expires
-	//   lazyExpire: Unix nano when entry should be evicted
+	//   expire: Unix timestamp in SECONDS when DNS TTL expires
+	//   lazyExpire: Unix timestamp in SECONDS when entry should be evicted
 	//   offsets: precomputed TTL field positions
 	//   count: number of TTL fields
 	Store(key string, packet []byte, expire, lazyExpire int64, offsets [8]uint16, count uint8)
