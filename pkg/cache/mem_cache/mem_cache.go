@@ -23,6 +23,8 @@ type elem struct {
 	storedTime int64 // Unix second - dùng để tính Subtract TTL
 	expire     int64 // Unix nano - mốc hết hạn thực tế
 	lazyExpire int64 // Unix nano - mốc hết hạn sau khi cộng thêm Lazy TTL
+	ttlOffsets [8]uint16
+	ttlCount   uint8
 }
 
 func NewMemCache(size int, cleanerInterval time.Duration) *MemCache {
