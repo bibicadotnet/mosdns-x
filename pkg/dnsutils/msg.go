@@ -17,21 +17,18 @@ var builderPool = sync.Pool{
 	},
 }
 
-// GetMsgKey tạo key định danh nhị phân (Không dùng ID/Salt để tối ưu Cache).
-// Nhận salt uint16 để giữ tương thích với plugin cache hiện tại nhưng không băm vào key.
-func GetMsgKey(m *dns.Msg, salt uint16) (string, error) {
+// GetMsgKey tạo key định danh nhị phân từ Question và ECS.
+// Không dùng ID/Salt vì nội dung đã được Pipeline chuẩn hóa duy nhất.
+func GetMsgKey(m *dns.Msg) (string, error) {
 	b := builderPool.Get().(*strings.Builder)
 	b.Reset()
 	defer builderPool.Put(b)
 
 	q := m.Question[0]
-
-	// 1. Question
 	b.WriteString(q.Name)
 	writeUint16(b, q.Qtype)
 	writeUint16(b, q.Qclass)
 
-	// 2. ECS (Đục thẳng Extra[0])
 	if len(m.Extra) > 0 {
 		if opt, ok := m.Extra[0].(*dns.OPT); ok {
 			if ecs, ok := opt.Option[0].(*dns.EDNS0_SUBNET); ok {
@@ -41,7 +38,6 @@ func GetMsgKey(m *dns.Msg, salt uint16) (string, error) {
 			}
 		}
 	}
-
 	return b.String(), nil
 }
 
