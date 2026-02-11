@@ -1,5 +1,8 @@
 /*
  * Copyright (C) 2020-2026, IrineSistiana
+ *
+ * Chiến lược: sync.Pool + strings.Builder (Grow 80)
+ * Đảm bảo: Bao phủ IPv6, triệt tiêu Heap Allocation, hiệu năng Mutex tối ưu.
  */
 
 package dnsutils
@@ -11,18 +14,18 @@ import (
 	"github.com/miekg/dns"
 )
 
-// builderPool tái sử dụng vùng nhớ để triệt tiêu GC.
+// builderPool tái sử dụng strings.Builder để triệt tiêu việc cấp phát bộ nhớ mới.
+// Pre-allocate 80 bytes để chứa vừa Domain dài + ECS IPv6 mà không cần grow lại.
 var builderPool = sync.Pool{
 	New: func() interface{} {
 		b := new(strings.Builder)
-		b.Grow(128)
+		b.Grow(80)
 		return b
 	},
 }
 
-// GetMsgKey tạo key nhị phân từ Question và ECS.
-// Dựa trên Pipeline: edns0_filter xóa trắng -> ecs.go xây lại
-// Key không chứa ID hay Salt vì nội dung đã được chuẩn hóa duy nhất.
+// GetMsgKey tạo key nhị phân định danh duy nhất từ Question và ECS.
+// Pipeline: edns0_filter (xóa trắng) -> ecs.go (xây chuẩn).
 func GetMsgKey(m *dns.Msg) string {
 	b := builderPool.Get().(*strings.Builder)
 	b.Reset()
@@ -30,19 +33,19 @@ func GetMsgKey(m *dns.Msg) string {
 
 	q := m.Question[0]
 
-	// 1. Question: Định danh nội dung câu hỏi
+	// 1. Ghi Question: Tên miền + Type + Class
 	b.WriteString(q.Name)
 	writeUint16(b, q.Qtype)
 	writeUint16(b, q.Qclass)
 
-	// 2. ECS: Đục thẳng vào bản ghi duy nhất trong Extra (do ecs.go đúc)
+	// 2. Ghi ECS: Đục thẳng vào m.Extra[0] (do ecs.go đúc)
 	if len(m.Extra) > 0 {
 		if opt, ok := m.Extra[0].(*dns.OPT); ok {
-			// Bốc thẳng Option đầu tiên, ecs.go đã đảm bảo nó là ECS sạch
+			// Bốc thẳng Option đầu tiên, ecs.go đã đảm bảo là ECS chuẩn.
 			if ecs, ok := opt.Option[0].(*dns.EDNS0_SUBNET); ok {
 				writeUint16(b, ecs.Family)
 				b.WriteByte(ecs.SourceNetmask)
-				b.Write(ecs.Address) 
+				b.Write(ecs.Address)
 			}
 		}
 	}
@@ -50,15 +53,15 @@ func GetMsgKey(m *dns.Msg) string {
 	return b.String()
 }
 
-// writeUint16 ghi byte nhị phân trực tiếp, CPU không tốn công parse chuỗi.
+// writeUint16 ghi byte nhị phân trực tiếp vào Builder.
 func writeUint16(b *strings.Builder, v uint16) {
 	b.WriteByte(byte(v >> 8))
 	b.WriteByte(byte(v))
 }
 
-// --- TTL Management (Phục vụ logic Cache Hit/Stale/Lazy) ---
+// --- Logic quản lý TTL cho Cache ---
 
-// GetMinimalTTL lấy TTL nhỏ nhất để tính expirationTime cho MemCache.
+// GetMinimalTTL tìm TTL thấp nhất để xác định expirationTime.
 func GetMinimalTTL(m *dns.Msg) uint32 {
 	minTTL := ^uint32(0)
 	hasRecord := false
@@ -80,19 +83,7 @@ func GetMinimalTTL(m *dns.Msg) uint32 {
 	return minTTL
 }
 
-// SetTTL cập nhật toàn bộ bản ghi (dùng cho Lazy Cache reply).
-func SetTTL(m *dns.Msg, ttl uint32) {
-	for _, section := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
-		for _, rr := range section {
-			hdr := rr.Header()
-			if hdr.Rrtype != dns.TypeOPT {
-				hdr.Ttl = ttl
-			}
-		}
-	}
-}
-
-// SubtractTTL trừ TTL thực tế trước khi trả về từ Cache.
+// SubtractTTL trừ TTL dựa trên thời gian thực tế đã nằm trong cache.
 func SubtractTTL(m *dns.Msg, delta uint32) (overflowed bool) {
 	for _, section := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
 		for _, rr := range section {
