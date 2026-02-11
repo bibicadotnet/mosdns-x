@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package reverselookup
 
 import (
@@ -124,7 +105,6 @@ func (p *reverseLookup) Close() error {
 }
 
 func (p *reverseLookup) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	req.Context()
 	ipStr := req.URL.Query().Get("ip")
 	addr, err := netip.ParseAddr(ipStr)
 	if err != nil {
@@ -138,7 +118,10 @@ func (p *reverseLookup) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (p *reverseLookup) lookup(n netip.Addr) string {
-	v, _, _ := p.c.Get(as16(n).String())
+	v, _, _, ok := p.c.Get(as16(n).String())
+	if !ok {
+		return ""
+	}
 	return string(v)
 }
 
@@ -146,8 +129,6 @@ func (p *reverseLookup) handlePTRQuery(q *dns.Msg) *dns.Msg {
 	if p.args.HandlePTR && len(q.Question) > 0 && q.Question[0].Qtype == dns.TypePTR {
 		question := q.Question[0]
 		addr, _ := utils.ParsePTRName(question.Name)
-		// If we cannot parse this ptr name. Just ignore it and pass query to next node.
-		// PTR standards are a mess.
 		if !addr.IsValid() {
 			return nil
 		}
@@ -175,7 +156,8 @@ func (p *reverseLookup) saveIPs(q, r *dns.Msg) {
 		return
 	}
 
-	now := time.Now()
+	nowNano := time.Now().UnixNano()
+
 	for _, rr := range r.Answer {
 		var ip net.IP
 		switch rr := rr.(type) {
@@ -191,15 +173,23 @@ func (p *reverseLookup) saveIPs(q, r *dns.Msg) {
 		if !ok {
 			continue
 		}
+		
 		h := rr.Header()
-		if int(h.Ttl) > p.args.TTL {
-			h.Ttl = uint32(p.args.TTL)
+		// --- GIỮ LẠI LOGIC GIỚI HẠN TTL ---
+		currentTTL := int(h.Ttl)
+		if currentTTL > p.args.TTL {
+			currentTTL = p.args.TTL
 		}
+		// ---------------------------------
+
 		name := h.Name
 		if len(q.Question) == 1 {
 			name = q.Question[0].Name
 		}
-		p.c.Store(as16(addr).String(), []byte(name), now, now.Add(time.Duration(p.args.TTL)*time.Second))
+
+		// Tính toán mốc hết hạn theo Nano
+		expire := nowNano + (int64(currentTTL) * 1e9)
+		p.c.Store(as16(addr).String(), []byte(name), expire, expire)
 	}
 }
 
