@@ -205,7 +205,7 @@ func (c *cachePlugin) getMsgKey(q *dns.Msg) (string, error) {
 	//
 	// At this stage, the DNS message is already normalized and safe to serialize
 	// directly as a binary cache key.
-	return dnsutils.GetMsgKey(q, 0)
+	return dnsutils.GetMsgKey(q)
 }
 
 func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err error) {
