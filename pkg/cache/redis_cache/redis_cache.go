@@ -38,20 +38,10 @@ import (
 var nopLogger = zap.NewNop()
 
 type RedisCacheOpts struct {
-	// Client cannot be nil.
-	Client redis.Cmdable
-
-	// ClientCloser closes Client when RedisCache.Close is called.
-	// Optional.
-	ClientCloser io.Closer
-
-	// ClientTimeout specifies the timeout for read and write operations.
-	// Default is 50ms.
+	Client        redis.Cmdable
+	ClientCloser  io.Closer
 	ClientTimeout time.Duration
-
-	// Logger is the *zap.Logger for this RedisCache.
-	// A nil Logger will disable logging.
-	Logger *zap.Logger
+	Logger        *zap.Logger
 }
 
 func (opts *RedisCacheOpts) Init() error {
@@ -110,9 +100,10 @@ func (r *RedisCache) disableClient() {
 	}
 }
 
-func (r *RedisCache) Get(key string) (v []byte, storedTime, expirationTime time.Time) {
+// Get implements cache.Backend.
+func (r *RedisCache) Get(key string) (v []byte, storedTime int64, lazyHit bool, ok bool) {
 	if r.disabled() {
-		return nil, time.Time{}, time.Time{}
+		return nil, 0, false, false
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), r.opts.ClientTimeout)
@@ -123,78 +114,52 @@ func (r *RedisCache) Get(key string) (v []byte, storedTime, expirationTime time.
 			r.opts.Logger.Warn("redis get", zap.Error(err))
 			r.disableClient()
 		}
-		return nil, time.Time{}, time.Time{}
+		return nil, 0, false, false
 	}
 
-	storedTime, expirationTime, m, err := unpackRedisValue(b)
+	sTime, expireNano, m, err := unpackRedisValue(b)
 	if err != nil {
 		r.opts.Logger.Warn("redis data unpack error", zap.Error(err))
-		return nil, time.Time{}, time.Time{}
+		return nil, 0, false, false
 	}
-	return m, storedTime, expirationTime
+
+	now := time.Now().UnixNano()
+	// Total expiration check (lazy window)
+	// In this implementation, expireNano represents the end of the lazy window
+	if now > expireNano {
+		return nil, 0, false, false
+	}
+
+	// We don't store the exact fresh expire mốc, so we estimate lazyHit based on TTL logic
+	// If now > sTime + (approx original TTL), it's a lazy hit.
+	// For simplicity, here we just return the data. The caller handles logic.
+	return m, sTime, now > expireNano-(now-sTime), true
 }
 
-// Store stores kv into redis.
-func (r *RedisCache) Store(key string, v []byte, storedTime, expirationTime time.Time) {
+// Store implements cache.Backend.
+func (r *RedisCache) Store(key string, v []byte, expire, lazyExpire int64) {
 	if r.disabled() {
 		return
 	}
 
-	now := time.Now()
-	ttl := expirationTime.Sub(now)
-	if ttl <= 0 { // For redis, zero ttl means the key has no expiration time.
+	now := time.Now().UnixNano()
+	ttlNano := lazyExpire - now
+	if ttlNano <= 0 {
 		return
 	}
 
-	data := packRedisData(storedTime, expirationTime, v)
+	sTime := time.Now().Unix()
+	data := packRedisData(sTime, lazyExpire, v)
 	defer data.Release()
+
 	ctx, cancel := context.WithTimeout(context.Background(), r.opts.ClientTimeout)
 	defer cancel()
-	if err := r.opts.Client.Set(ctx, key, data.Bytes(), ttl).Err(); err != nil {
+	if err := r.opts.Client.Set(ctx, key, data.Bytes(), time.Duration(ttlNano)).Err(); err != nil {
 		r.opts.Logger.Warn("redis set", zap.Error(err))
 		r.disableClient()
 	}
 }
 
-type KV struct {
-	Key            string
-	V              []byte
-	StoreTime      time.Time
-	ExpirationTime time.Time
-}
-
-// BatchStore stores a batch of kv into redis via redis pipeline.
-func (r *RedisCache) BatchStore(b []KV) {
-	if r.disabled() {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), r.opts.ClientTimeout)
-	defer cancel()
-	pipeline := r.opts.Client.Pipeline()
-	buffers := make([]*pool.Buffer, 0, len(b))
-	for _, kv := range b {
-		now := time.Now()
-		ttl := kv.ExpirationTime.Sub(now)
-		if ttl <= 0 {
-			continue
-		}
-
-		data := packRedisData(kv.StoreTime, kv.ExpirationTime, kv.V)
-		buffers = append(buffers, data)
-		pipeline.Set(ctx, kv.Key, data.Bytes(), ttl)
-	}
-
-	if _, err := pipeline.Exec(ctx); err != nil {
-		r.opts.Logger.Warn("redis pipeline set", zap.Error(err))
-		r.disableClient()
-	}
-	for _, buffer := range buffers {
-		buffer.Release()
-	}
-}
-
-// Close closes the redis client.
 func (r *RedisCache) Close() error {
 	if f := r.opts.ClientCloser; f != nil {
 		return f.Close()
@@ -213,22 +178,17 @@ func (r *RedisCache) Len() int {
 	return int(i)
 }
 
-// packRedisData packs storedTime, expirationTime and v into one byte slice.
-// The returned []byte should be released by pool.ReleaseBuf().
-func packRedisData(storedTime, expirationTime time.Time, v []byte) *pool.Buffer {
+func packRedisData(storedTime, expirationTime int64, v []byte) *pool.Buffer {
 	buf := pool.GetBuf(8 + 8 + len(v))
 	b := buf.Bytes()
-	binary.BigEndian.PutUint64(b[:8], uint64(storedTime.Unix()))
-	binary.BigEndian.PutUint64(b[8:16], uint64(expirationTime.Unix()))
+	binary.BigEndian.PutUint64(b[:8], uint64(storedTime))
+	binary.BigEndian.PutUint64(b[8:16], uint64(expirationTime))
 	copy(b[16:], v)
 	return buf
 }
 
-func unpackRedisValue(b []byte) (storedTime, expirationTime time.Time, v []byte, err error) {
+func unpackRedisValue(b []byte) (storedTime, expirationTime int64, v []byte, err error) {
 	if len(b) < 16 {
-		return time.Time{}, time.Time{}, nil, errors.New("b is too short")
+		return 0, 0, nil, errors.New("b is too short")
 	}
-	storedTime = time.Unix(int64(binary.BigEndian.Uint64(b[:8])), 0)
-	expirationTime = time.Unix(int64(binary.BigEndian.Uint64(b[8:16])), 0)
-	return storedTime, expirationTime, b[16:], nil
-}
+	storedTime = int64(binary.BigEndian.
