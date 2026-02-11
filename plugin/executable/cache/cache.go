@@ -15,10 +15,17 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+type Args struct {
+	Size              int  `yaml:"size"`
+	LazyCacheTTL      int  `yaml:"lazy_cache_ttl"`
+	LazyCacheReplyTTL int  `yaml:"lazy_cache_reply_ttl"`
+	CleanerInterval   *int `yaml:"cleaner_interval"`
+}
+
 type cachePlugin struct {
 	*coremain.BP
 	args         *Args
-	backend      *mem_cache.MemCache // Static dispatch for performance
+	backend      *mem_cache.MemCache
 	lazyUpdateSF singleflight.Group
 }
 
