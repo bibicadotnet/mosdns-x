@@ -2,13 +2,11 @@ package reverselookup
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/miekg/dns"
 
 	"github.com/pmkol/mosdns-x/coremain"
