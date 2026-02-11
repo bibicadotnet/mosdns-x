@@ -1,7 +1,6 @@
 package dnsutils
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 	"sync"
