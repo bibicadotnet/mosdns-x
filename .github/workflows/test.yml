@@ -12,7 +12,7 @@ jobs:
       - name: get latest go version
         id: go
         run: |
-          echo version=$(curl -s https://raw.githubusercontent.com/actions/go-versions/update-versions-manifest-file/versions-manifest.json | grep -oE '"version": "[0-9]{1}.[0-9]{1,}(.[0-9]{1,})?"' | head -1 | cut -d':' -f2 | sed 's/ //g; s/"//g') >> $GITHUB_OUTPUT
+          echo version=1.25.5 >> $GITHUB_OUTPUT
 
       - name: Set up Go
         uses: actions/setup-go@v5.5.0
