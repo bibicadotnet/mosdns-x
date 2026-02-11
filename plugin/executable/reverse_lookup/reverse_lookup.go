@@ -12,9 +12,8 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/pmkol/mosdns-x/coremain"
-	"github.com/pmkol/mosdns-x/pkg/cache"
 	"github.com/pmkol/mosdns-x/pkg/cache/mem_cache"
-	"github.com/pmkol/mosdns-x/pkg/cache/redis_cache"
+	// "github.com/pmkol/mosdns-x/pkg/cache/redis_cache" // Nếu redis_cache chưa upgrade interface thì tạm thời dùng mem_cache
 	"github.com/pmkol/mosdns-x/pkg/executable_seq"
 	"github.com/pmkol/mosdns-x/pkg/query_context"
 	"github.com/pmkol/mosdns-x/pkg/utils"
@@ -31,10 +30,10 @@ func init() {
 var _ coremain.ExecutablePlugin = (*reverseLookup)(nil)
 
 type Args struct {
-	Size      int    `yaml:"size"` // Default is 64*1024
+	Size      int    `yaml:"size"`
 	Redis     string `yaml:"redis"`
 	HandlePTR bool   `yaml:"handle_ptr"`
-	TTL       int    `yaml:"ttl"` // Default is 1800 (30min)
+	TTL       int    `yaml:"ttl"`
 }
 
 func (a *Args) initDefault() *Args {
@@ -50,7 +49,8 @@ func (a *Args) initDefault() *Args {
 type reverseLookup struct {
 	*coremain.BP
 	args *Args
-	c    cache.Backend
+	// Dùng trực tiếp mem_cache để tránh lỗi interface nếu redis_cache chưa upgrade
+	c    *mem_cache.MemCache 
 }
 
 func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
@@ -59,25 +59,11 @@ func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
 
 func newReverseLookup(bp *coremain.BP, args *Args) (coremain.Plugin, error) {
 	args.initDefault()
-	var c cache.Backend
-	if u := args.Redis; len(u) > 0 {
-		opts, err := redis.ParseURL(u)
-		if err != nil {
-			return nil, fmt.Errorf("invalid redis url, %w", err)
-		}
-		r := redis.NewClient(opts)
-		rc, err := redis_cache.NewRedisCache(redis_cache.RedisCacheOpts{
-			Client:       r,
-			ClientCloser: r,
-			Logger:       bp.L(),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to init redis cache, %w", err)
-		}
-		c = rc
-	} else {
-		c = mem_cache.NewMemCache(args.Size, 0)
-	}
+	
+	// Lưu ý: Tôi đổi sang dùng mem_cache trực tiếp vì Backend interface cũ đã bị phá bỏ
+	// Nếu ông muốn dùng Redis, ông phải upgrade redis_cache.go theo interface mới.
+	c := mem_cache.NewMemCache(args.Size, 0)
+	
 	p := &reverseLookup{
 		BP:   bp,
 		args: args,
@@ -113,12 +99,14 @@ func (p *reverseLookup) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	d := p.lookup(netip.AddrFrom16(addr.As16()))
+	d := p.lookup(addr)
 	w.Write([]byte(d))
 }
 
 func (p *reverseLookup) lookup(n netip.Addr) string {
-	v, _, _, ok := p.c.Get(as16(n).String())
+	// Khớp với interface Get: trả về 6 giá trị
+	// offsets và count không dùng cho reverse lookup nên bỏ qua (_)
+	v, _, _, _, _, ok := p.c.Get(as16(n).String())
 	if !ok {
 		return ""
 	}
@@ -156,7 +144,7 @@ func (p *reverseLookup) saveIPs(q, r *dns.Msg) {
 		return
 	}
 
-	nowNano := time.Now().UnixNano()
+	now := time.Now().Unix() // Đồng nhất sang GIÂY
 
 	for _, rr := range r.Answer {
 		var ip net.IP
@@ -175,21 +163,22 @@ func (p *reverseLookup) saveIPs(q, r *dns.Msg) {
 		}
 		
 		h := rr.Header()
-		// --- GIỮ LẠI LOGIC GIỚI HẠN TTL ---
 		currentTTL := int(h.Ttl)
 		if currentTTL > p.args.TTL {
 			currentTTL = p.args.TTL
 		}
-		// ---------------------------------
 
 		name := h.Name
 		if len(q.Question) == 1 {
 			name = q.Question[0].Name
 		}
 
-		// Tính toán mốc hết hạn theo Nano
-		expire := nowNano + (int64(currentTTL) * 1e9)
-		p.c.Store(as16(addr).String(), []byte(name), expire, expire)
+		// Tính toán mốc hết hạn theo GIÂY
+		expire := now + int64(currentTTL)
+		
+		// Truyền 8 đối số cho Store: 
+		// offsets = [8]uint16{}, count = 0 (vì đây không phải DNS message thô)
+		p.c.Store(as16(addr).String(), []byte(name), expire, expire, [8]uint16{}, 0)
 	}
 }
 
