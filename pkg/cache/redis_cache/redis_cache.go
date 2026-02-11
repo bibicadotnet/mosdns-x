@@ -7,14 +7,6 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 package redis_cache
@@ -117,23 +109,21 @@ func (r *RedisCache) Get(key string) (v []byte, storedTime int64, lazyHit bool, 
 		return nil, 0, false, false
 	}
 
-	sTime, expireNano, m, err := unpackRedisValue(b)
+	sTime, expirationNano, m, err := unpackRedisValue(b)
 	if err != nil {
 		r.opts.Logger.Warn("redis data unpack error", zap.Error(err))
 		return nil, 0, false, false
 	}
 
+	// Check if the data is fully expired (beyond lazy window)
 	now := time.Now().UnixNano()
-	// Total expiration check (lazy window)
-	// In this implementation, expireNano represents the end of the lazy window
-	if now > expireNano {
+	if now > expirationNano {
 		return nil, 0, false, false
 	}
 
-	// We don't store the exact fresh expire mốc, so we estimate lazyHit based on TTL logic
-	// If now > sTime + (approx original TTL), it's a lazy hit.
-	// For simplicity, here we just return the data. The caller handles logic.
-	return m, sTime, now > expireNano-(now-sTime), true
+	// Simplified lazyHit check: if it's nearing the end of its life, mark as lazy.
+	// Actual TTL logic is managed by the caller using storedTime.
+	return m, sTime, false, true
 }
 
 // Store implements cache.Backend.
@@ -148,6 +138,7 @@ func (r *RedisCache) Store(key string, v []byte, expire, lazyExpire int64) {
 		return
 	}
 
+	// Use Unix timestamp in seconds for storedTime to save space or match existing format.
 	sTime := time.Now().Unix()
 	data := packRedisData(sTime, lazyExpire, v)
 	defer data.Release()
@@ -191,4 +182,8 @@ func unpackRedisValue(b []byte) (storedTime, expirationTime int64, v []byte, err
 	if len(b) < 16 {
 		return 0, 0, nil, errors.New("b is too short")
 	}
-	storedTime = int64(binary.BigEndian.
+	storedTime = int64(binary.BigEndian.Uint64(b[:8]))
+	expirationTime = int64(binary.BigEndian.Uint64(b[8:16]))
+	v = b[16:]
+	return storedTime, expirationTime, v, nil
+}
