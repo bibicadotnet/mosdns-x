@@ -280,10 +280,7 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 		NextProtos:       nextProtos,
 		Defaults: eTLS.Defaults{
 			AllSecureCipherSuites: true,
-			CurvePreferences: []eTLS.CurveID{
-				eTLS.X25519,
-				eTLS.CurveP256,
-			},
+			AllSecureCurves:       false,
 		},
 		GetCertificate: func(chi *eTLS.ClientHelloInfo) (*eTLS.Certificate, error) {
 			cert := c.get()
