@@ -1,40 +1,25 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package cache
 
-import (
-	"io"
-	"time"
-)
+import "io"
 
 type Backend interface {
-	// Get retrieves v from Backend. The returned v may be the original value. The caller should
-	// not modify it.
-	Get(key string) (v []byte, storedTime, expirationTime time.Time)
+	// Get retrieves cached packet.
+	// Returns:
+	//   - packet: raw DNS wire format (may be compressed)
+	//   - storedTime: Unix timestamp (seconds) when stored
+	//   - lazyHit: true if entry is stale but within lazy window
+	//   - ok: false if not found or fully expired
+	Get(key string) (packet []byte, storedTime int64, lazyHit bool, ok bool)
 
-	// Store stores a copy of v into Backend. v cannot be nil.
-	// If expirationTime is already passed, Store is a noop.
-	Store(key string, v []byte, storedTime, expirationTime time.Time)
+	// Store caches a DNS packet with dual expiration.
+	// Params:
+	//   - packet: raw DNS wire format (caller's buffer, will be copied)
+	//   - expire: Unix nano when DNS TTL expires (fresh → stale)
+	//   - lazyExpire: Unix nano when entry should be evicted (stale → deleted)
+	// If lazyExpire <= expire, lazy mode is disabled.
+	Store(key string, packet []byte, expire, lazyExpire int64)
 
 	Len() int
 
-	// Closer closes the cache backend. Get and Store should become noop calls.
 	io.Closer
 }
