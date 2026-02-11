@@ -273,14 +273,14 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 		MaxEarlyData:     4096,
 		NextProtos:       nextProtos,
 
-		CertCompressionAlgos: []eTLS.CertCompressionAlgo{
-			eTLS.CertCompressionBrotli,
-			eTLS.CertCompressionZlib,
+		CertificateCompressionPreferences: []eTLS.CertificateCompressionAlgorithm{
+			eTLS.Brotli,
+			eTLS.Zlib,
 		},
 
-		RecordSizeLimit: 1252,
+		MaxRecordSize: 1252,
 
-		PreferServerCipherSuites: true,
+		PreferCipherSuites: true,
 		CipherSuites: []uint16{
 			eTLS.TLS_AES_128_GCM_SHA256,
 			eTLS.TLS_CHACHA20_POLY1305_SHA256,
