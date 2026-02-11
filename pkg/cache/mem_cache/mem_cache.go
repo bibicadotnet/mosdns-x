@@ -22,6 +22,7 @@ type MemCache struct {
 
 type elem struct {
 	packet     []byte
+	storedTime int64 // Unix second - Cần thiết để tính Subtract TTL
 	expire     int64 // Unix nano - Actual DNS record TTL
 	lazyExpire int64 // Unix nano - expire + lazy_cache_ttl
 }
@@ -58,35 +59,31 @@ func (c *MemCache) Close() error {
 	return nil
 }
 
-// Get returns (packet, lazyHit, ok)
-// - lazyHit = true: record expired but within lazy window
-// - lazyHit = false: record fresh or miss
-// Note: It returns the raw internal slice. The caller is responsible for 
-// copying the packet if modification (e.g., patching ID) is required.
-func (c *MemCache) Get(key string) (packet []byte, lazyHit bool, ok bool) {
+// Get returns (packet, storedTime, lazyHit, ok)
+func (c *MemCache) Get(key string) (packet []byte, storedTime int64, lazyHit bool, ok bool) {
 	if c.isClosed() {
-		return nil, false, false
+		return nil, 0, false, false
 	}
 
 	e, found := c.lru.Get(key)
 	if !found {
-		return nil, false, false
+		return nil, 0, false, false
 	}
 
 	now := time.Now().UnixNano()
 
 	// Fully expired (exceeds lazy window)
 	if now > e.lazyExpire {
-		return nil, false, false
+		return nil, 0, false, false
 	}
 
 	// Stale (lazy hit)
 	if now > e.expire {
-		return e.packet, true, true
+		return e.packet, e.storedTime, true, true
 	}
 
 	// Fresh hit
-	return e.packet, false, true
+	return e.packet, e.storedTime, false, true
 }
 
 // Store saves packet with expire and lazyExpire timestamps (Unix nano)
@@ -101,6 +98,7 @@ func (c *MemCache) Store(key string, packet []byte, expire, lazyExpire int64) {
 
 	c.lru.Add(key, &elem{
 		packet:     buf,
+		storedTime: time.Now().Unix(),
 		expire:     expire,
 		lazyExpire: lazyExpire,
 	})
