@@ -20,9 +20,9 @@ type MemCache struct {
 
 type elem struct {
 	packet     []byte
-	storedTime int64 // Unix second - dùng để tính Subtract TTL
-	expire     int64 // Unix nano - mốc hết hạn thực tế
-	lazyExpire int64 // Unix nano - mốc hết hạn sau khi cộng thêm Lazy TTL
+	storedTime int64    // Unix second
+	expire     int64    // Unix second
+	lazyExpire int64    // Unix second
 	ttlOffsets [8]uint16
 	ttlCount   uint8
 }
@@ -64,14 +64,13 @@ func (c *MemCache) Get(key string) (packet []byte, storedTime int64, offsets [8]
 		return nil, 0, [8]uint16{}, 0, false, false
 	}
 
-	now := time.Now().UnixNano()
+	now := time.Now().Unix() // Đồng nhất về giây
 
-	// Quá hạn hoàn toàn (vượt cả cửa sổ Lazy)
+	// Quá hạn hoàn toàn
 	if now > e.lazyExpire {
 		return nil, 0, [8]uint16{}, 0, false, false
 	}
 
-	// Trả về gói tin và trạng thái
 	lazyHit = now > e.expire
 	return e.packet, e.storedTime, e.ttlOffsets, e.ttlCount, lazyHit, true
 }
@@ -81,15 +80,15 @@ func (c *MemCache) Store(key string, packet []byte, expire, lazyExpire int64, of
 		return
 	}
 
-	// Copy sang buffer mới để Backend làm chủ vùng nhớ
+	// Copy để Backend làm chủ vùng nhớ
 	buf := make([]byte, len(packet))
 	copy(buf, packet)
 
 	c.lru.Add(key, &elem{
 		packet:     buf,
-		storedTime: time.Now().Unix(),
-		expire:     expire,
-		lazyExpire: lazyExpire,
+		storedTime: time.Now().Unix(), // Unix giây
+		expire:     expire,             // Mong đợi đơn vị giây từ caller
+		lazyExpire: lazyExpire,         // Mong đợi đơn vị giây từ caller
 		ttlOffsets: offsets,
 		ttlCount:   count,
 	})
@@ -107,7 +106,7 @@ func (c *MemCache) startCleaner(interval time.Duration) {
 		case <-c.closeCleanerChan:
 			return
 		case <-ticker.C:
-			now := time.Now().UnixNano()
+			now := time.Now().Unix() // Đồng nhất về giây
 			c.lru.Clean(func(_ string, e *elem) bool {
 				return e.lazyExpire <= now
 			})
