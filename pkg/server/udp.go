@@ -94,11 +94,11 @@ func (s *Server) ServeUDP(c net.PacketConn) error {
 			qCtx := C.NewContext(q, meta)
 
 			var err error
-			// 🚀 Ưu tiên gọi RawHandler để kích hoạt Zero-Unpack
+			// 🚀 Kích hoạt làn đường ưu tiên cho Zero-Unpack
 			if rawH, ok := handler.(dns_handler.RawHandler); ok {
 				err = rawH.ServeDNSRaw(listenerCtx, qCtx)
 			} else {
-				// Legacy Path
+				// Fallback Legacy Path cho các plugin cũ
 				r, e := handler.ServeDNS(listenerCtx, q, meta)
 				err = e
 				if r != nil {
@@ -112,7 +112,7 @@ func (s *Server) ServeUDP(c net.PacketConn) error {
 			}
 
 			// ===== FAST PATH (Zero-Unpack) =====
-			// Nếu đã có raw bytes (đã được patch ID/TTL/TC ở plugin layer), gửi thẳng luôn
+			// Gửi thẳng bytes thô. Business logic (ID, RA, TC, TTL) do Plugin xử lý.
 			if raw := qCtx.RawR(); raw != nil {
 				if _, err := cmc.writeTo(raw, localAddr, ifIndex, remoteAddr); err != nil {
 					s.opts.Logger.Warn("failed to write raw response", zap.Stringer("client", remoteAddr), zap.Error(err))
@@ -122,12 +122,9 @@ func (s *Server) ServeUDP(c net.PacketConn) error {
 			}
 
 			// ===== LEGACY PATH =====
-			// Fallback đóng gói dns.Msg nếu không có raw bytes
+			// Dành cho các plugin vẫn trả về dns.Msg
 			if r := qCtx.R(); r != nil {
-				r.Id = q.Id
-				if s.opts.RecursionAvailable {
-					r.RecursionAvailable = true
-				}
+				r.Id = q.Id // Đảm bảo ID khớp cho legacy plugin
 				r.Truncate(getUDPSize(q))
 
 				b, buf, err := pool.PackBuffer(r)
@@ -135,10 +132,11 @@ func (s *Server) ServeUDP(c net.PacketConn) error {
 					s.opts.Logger.Error("failed to pack handler's response", zap.Error(err), zap.Stringer("msg", r))
 					return
 				}
-				defer buf.Release()
+				
 				if _, err := cmc.writeTo(b, localAddr, ifIndex, remoteAddr); err != nil {
 					s.opts.Logger.Warn("failed to write response", zap.Stringer("client", remoteAddr), zap.Error(err))
 				}
+				buf.Release()
 			}
 		}()
 	}
@@ -155,13 +153,10 @@ func getUDPSize(m *dns.Msg) int {
 	return int(s)
 }
 
-// newDummyCmc returns a dummyCmcWrapper.
 func newDummyCmc(c net.PacketConn) cmcUDPConn {
 	return dummyCmcWrapper{c: c}
 }
 
-// dummyCmcWrapper is just a wrapper that implements cmcUDPConn but does not
-// write or read any control msg.
 type dummyCmcWrapper struct {
 	c net.PacketConn
 }
