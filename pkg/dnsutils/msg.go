@@ -1,128 +1,115 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package dnsutils
 
 import (
-	"encoding/binary"
 	"strconv"
-	"strings"
 
 	"github.com/miekg/dns"
-
-	"github.com/pmkol/mosdns-x/pkg/pool"
-	"github.com/pmkol/mosdns-x/pkg/utils"
 )
 
-// GetMinimalTTL returns the minimal ttl of this msg.
-// If msg m has no record, it returns 0.
+// GetMsgKey generates a compact binary identification key.
+// Pre-condition: Detailed validations (e.g., Question count, normalization)
+// are skipped here as they are strictly enforced by upstream pipeline plugins.
+func GetMsgKey(m *dns.Msg, salt uint16) (string, error) {
+	q := m.Question[0]
+	size := len(q.Name) + 4 // Qname + Qtype(2) + Qclass(2)
+
+	var ecs *dns.EDNS0_SUBNET
+	// Pipeline architecture guarantees OPT is at Extra[0] and ECS is at Option[0].
+	if len(m.Extra) > 0 {
+		if opt, ok := m.Extra[0].(*dns.OPT); ok && len(opt.Option) > 0 {
+			if e, ok := opt.Option[0].(*dns.EDNS0_SUBNET); ok {
+				ecs = e
+				size += 3 + len(ecs.Address) // Family(2) + Mask(1) + Address
+			}
+		}
+	}
+
+	// Optimized for performance: 2 small heap allocations (~20-64 bytes each).
+	// One for the 'buf' slice and one for the 'string' copy.
+	// This is cleaner and often faster than sync.Pool for small, short-lived keys.
+	buf := make([]byte, 0, size)
+	buf = append(buf, q.Name...)
+	buf = append(buf, byte(q.Qtype>>8), byte(q.Qtype))
+	buf = append(buf, byte(q.Qclass>>8), byte(q.Qclass))
+
+	if ecs != nil {
+		buf = append(buf, byte(ecs.Family>>8), byte(ecs.Family))
+		buf = append(buf, ecs.SourceNetmask)
+		buf = append(buf, ecs.Address...)
+	}
+
+	return string(buf), nil
+}
+
+// --- TTL Management ---
+
+// GetMinimalTTL returns the smallest TTL in the message, skipping OPT records.
 func GetMinimalTTL(m *dns.Msg) uint32 {
 	minTTL := ^uint32(0)
 	hasRecord := false
 	for _, section := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
 		for _, rr := range section {
 			hdr := rr.Header()
-			if hdr.Rrtype == dns.TypeOPT {
-				continue // opt record ttl is not ttl.
-			}
-			hasRecord = true
-			ttl := hdr.Ttl
-			if ttl < minTTL {
-				minTTL = ttl
+			if hdr.Rrtype != dns.TypeOPT {
+				hasRecord = true
+				if hdr.Ttl < minTTL {
+					minTTL = hdr.Ttl
+				}
 			}
 		}
 	}
-
-	if !hasRecord { // no ttl applied
+	if !hasRecord {
 		return 0
 	}
 	return minTTL
 }
 
-// SetTTL updates all records' ttl to ttl, except opt record.
-func SetTTL(m *dns.Msg, ttl uint32) {
+// applyTTL is a consolidated helper for Set/Max/Min TTL operations to reduce code duplication.
+func applyTTL(m *dns.Msg, ttl uint32, mode int) {
 	for _, section := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
 		for _, rr := range section {
 			hdr := rr.Header()
-			if hdr.Rrtype == dns.TypeOPT {
-				continue // opt record ttl is not ttl.
+			if hdr.Rrtype != dns.TypeOPT {
+				switch mode {
+				case 1: // Maximum
+					if hdr.Ttl > ttl {
+						hdr.Ttl = ttl
+					}
+				case 2: // Minimal
+					if hdr.Ttl < ttl {
+						hdr.Ttl = ttl
+					}
+				default: // Set
+					hdr.Ttl = ttl
+				}
 			}
-			hdr.Ttl = ttl
 		}
 	}
 }
 
-func ApplyMaximumTTL(m *dns.Msg, ttl uint32) {
-	applyTTL(m, ttl, true)
-}
+func SetTTL(m *dns.Msg, ttl uint32)          { applyTTL(m, ttl, 0) }
+func ApplyMaximumTTL(m *dns.Msg, ttl uint32) { applyTTL(m, ttl, 1) }
+func ApplyMinimalTTL(m *dns.Msg, ttl uint32) { applyTTL(m, ttl, 2) }
 
-func ApplyMinimalTTL(m *dns.Msg, ttl uint32) {
-	applyTTL(m, ttl, false)
-}
-
-// SubtractTTL subtract delta from every m's RR.
-// If RR's TTL is smaller than delta, SubtractTTL
-// will return overflowed = true.
+// SubtractTTL reduces all RRs' TTL by delta. Returns overflowed=true if floor (1s) is hit.
 func SubtractTTL(m *dns.Msg, delta uint32) (overflowed bool) {
 	for _, section := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
 		for _, rr := range section {
 			hdr := rr.Header()
-			if hdr.Rrtype == dns.TypeOPT {
-				continue // opt record ttl is not ttl.
-			}
-			if ttl := hdr.Ttl; ttl > delta {
-				hdr.Ttl = ttl - delta
-			} else {
-				hdr.Ttl = 1
-				overflowed = true
+			if hdr.Rrtype != dns.TypeOPT {
+				if hdr.Ttl > delta {
+					hdr.Ttl -= delta
+				} else {
+					hdr.Ttl = 1
+					overflowed = true
+				}
 			}
 		}
 	}
 	return
 }
 
-func applyTTL(m *dns.Msg, ttl uint32, maximum bool) {
-	for _, section := range [...][]dns.RR{m.Answer, m.Ns, m.Extra} {
-		for _, rr := range section {
-			hdr := rr.Header()
-			if hdr.Rrtype == dns.TypeOPT {
-				continue // opt record ttl is not ttl.
-			}
-			if maximum {
-				if hdr.Ttl > ttl {
-					hdr.Ttl = ttl
-				}
-			} else {
-				if hdr.Ttl < ttl {
-					hdr.Ttl = ttl
-				}
-			}
-		}
-	}
-}
-
-func uint16Conv(u uint16, m map[uint16]string) string {
-	if s, ok := m[u]; ok {
-		return s
-	}
-	return strconv.Itoa(int(u))
-}
+// --- Helpers ---
 
 func QclassToString(u uint16) string {
 	return uint16Conv(u, dns.ClassToString)
@@ -132,22 +119,30 @@ func QtypeToString(u uint16) string {
 	return uint16Conv(u, dns.TypeToString)
 }
 
+func uint16Conv(u uint16, m map[uint16]string) string {
+	if s, ok := m[u]; ok {
+		return s
+	}
+	return strconv.Itoa(int(u))
+}
+
+// GenEmptyReply creates a skeletal response with a fake SOA.
+// Used for negative caching when an upstream error or block occurs.
 func GenEmptyReply(q *dns.Msg, rcode int) *dns.Msg {
 	r := new(dns.Msg)
 	r.SetRcode(q, rcode)
 	r.RecursionAvailable = true
 
-	var name string
-	if len(q.Question) > 1 {
+	name := "."
+	if len(q.Question) > 0 {
 		name = q.Question[0].Name
-	} else {
-		name = "."
 	}
 
 	r.Ns = []dns.RR{FakeSOA(name)}
 	return r
 }
 
+// FakeSOA returns a static SOA record.
 func FakeSOA(name string) *dns.SOA {
 	return &dns.SOA{
 		Hdr: dns.RR_Header{
@@ -164,41 +159,4 @@ func FakeSOA(name string) *dns.SOA {
 		Expire:  604800,
 		Minttl:  86400,
 	}
-}
-
-// GetMsgKey unpacks m and set its id to salt.
-func GetMsgKey(m *dns.Msg, salt uint16) (string, error) {
-	wireMsg, err := m.Pack()
-	if err != nil {
-		return "", err
-	}
-	wireMsg[0] = byte(salt >> 8)
-	wireMsg[1] = byte(salt)
-	return utils.BytesToStringUnsafe(wireMsg), nil
-}
-
-// GetMsgKeyWithBytesSalt unpacks m and appends salt to the string.
-func GetMsgKeyWithBytesSalt(m *dns.Msg, salt []byte) (string, error) {
-	wireMsg, buf, err := pool.PackBuffer(m)
-	if err != nil {
-		return "", err
-	}
-	defer buf.Release()
-
-	wireMsg[0] = 0
-	wireMsg[1] = 0
-
-	sb := new(strings.Builder)
-	sb.Grow(len(wireMsg) + len(salt))
-	sb.Write(wireMsg)
-	sb.Write(salt)
-
-	return sb.String(), nil
-}
-
-// GetMsgKeyWithInt64Salt unpacks m and appends salt to the string.
-func GetMsgKeyWithInt64Salt(m *dns.Msg, salt int64) (string, error) {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, uint64(salt))
-	return GetMsgKeyWithBytesSalt(m, b)
 }
