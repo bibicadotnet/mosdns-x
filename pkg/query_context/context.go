@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package query_context
 
 import (
@@ -44,15 +25,10 @@ const (
 	ProtocolH3    = "h3"
 )
 
-// RequestMeta represents some metadata about the request.
 type RequestMeta struct {
-	// ClientAddr contains the client ip address.
-	// It might be zero/invalid.
 	clientAddr netip.Addr
-
 	serverName string
-
-	protocol string
+	protocol   string
 }
 
 func NewRequestMeta(addr netip.Addr) *RequestMeta {
@@ -61,9 +37,6 @@ func NewRequestMeta(addr netip.Addr) *RequestMeta {
 	return meta
 }
 
-// OriginalQuery returns the copied original query msg a that created the Context.
-// It always returns a non-nil msg.
-// The returned msg SHOULD NOT be modified.
 func (m *RequestMeta) SetClientAddr(addr netip.Addr) {
 	if addr.Is4In6() {
 		addr = addr.Unmap()
@@ -91,20 +64,19 @@ func (m *RequestMeta) GetServerName() string {
 	return m.serverName
 }
 
-// Context is a query context that pass through plugins
-// A Context will always have a non-nil Q.
-// Context MUST be created using NewContext.
-// All Context funcs are not safe for concurrent use.
 type Context struct {
-	// init at beginning
-	startTime     time.Time // when this Context was created
+	startTime     time.Time
 	q             *dns.Msg
 	originalQuery *dns.Msg
-	id            uint32 // additional uint to distinguish duplicated msg
+	id            uint32
 	reqMeta       *RequestMeta
 
 	r     *dns.Msg
 	marks map[uint]struct{}
+
+	// Transport optimization fields
+	rawR            []byte
+	rawRReleaseFunc func()
 }
 
 var (
@@ -112,9 +84,6 @@ var (
 	zeroRequestMeta = &RequestMeta{}
 )
 
-// NewContext creates a new query Context.
-// q is the query dns msg. It cannot be nil, or NewContext will panic.
-// meta can be nil.
 func NewContext(q *dns.Msg, meta *RequestMeta) *Context {
 	if q == nil {
 		panic("handler: query msg is nil")
@@ -135,89 +104,82 @@ func NewContext(q *dns.Msg, meta *RequestMeta) *Context {
 	return ctx
 }
 
-// String returns a short summery of its query.
 func (ctx *Context) String() string {
 	var question string
-	// var clientAddr string  // <-- Comment dòng này
-
 	if len(ctx.q.Question) >= 1 {
 		q := ctx.q.Question[0]
 		question = fmt.Sprintf("%s %s %s", q.Name, dnsutils.QclassToString(q.Qclass), dnsutils.QtypeToString(q.Qtype))
 	} else {
 		question = "empty question"
 	}
-	
-	// Comment toàn bộ phần xử lý clientAddr
-	/*
-	if ctx.reqMeta.clientAddr.IsValid() {
-		clientAddr = ctx.reqMeta.clientAddr.String()
-	} else {
-		clientAddr = "unknown client"
-	}
-	*/
-
-	// Bỏ clientAddr khỏi return string
 	return fmt.Sprintf("%s %d %d", question, ctx.q.Id, ctx.id)
-	// return fmt.Sprintf("%s %d %d %s", question, ctx.q.Id, ctx.id, clientAddr)  // <-- Dòng cũ
 }
 
-// Q returns the query msg. It always returns a non-nil msg.
 func (ctx *Context) Q() *dns.Msg {
 	return ctx.q
 }
 
-// OriginalQuery returns the copied original query msg a that created the Context.
-// It always returns a non-nil msg.
-// The returned msg SHOULD NOT be modified.
 func (ctx *Context) OriginalQuery() *dns.Msg {
 	return ctx.originalQuery
 }
 
-// ReqMeta returns the request metadata. It always returns a non-nil RequestMeta.
-// The returned *RequestMeta is a reference shared by all ReqMeta.
-// Caller must not modify it.
 func (ctx *Context) ReqMeta() *RequestMeta {
 	return ctx.reqMeta
 }
 
-// R returns the response. It might be nil.
 func (ctx *Context) R() *dns.Msg {
 	return ctx.r
 }
 
-// SetResponse stores the response r to the context.
-// Note: It just stores the pointer of r. So the caller
-// shouldn't modify or read r after the call.
+// SetResponse stores the response and clears rawR to maintain consistency.
 func (ctx *Context) SetResponse(r *dns.Msg) {
 	ctx.r = r
+	// Clear raw response to avoid inconsistent state
+	ctx.rawR = nil
+	ctx.rawRReleaseFunc = nil
 }
 
-// Id returns the Context id.
-// Note: This id is not the dns msg id.
-// It's a unique uint32 growing with the number of query.
+// SetRawResponse sets the pre-patched wire format response and clears the logical response r.
+func (ctx *Context) SetRawResponse(raw []byte, releaseFunc func()) {
+	ctx.r = nil // Clear logical response to maintain consistency
+	ctx.rawR = raw
+	ctx.rawRReleaseFunc = releaseFunc
+}
+
+// RawR returns the raw response bytes.
+func (ctx *Context) RawR() []byte {
+	return ctx.rawR
+}
+
+// ReleaseRawR releases the raw response buffer.
+func (ctx *Context) ReleaseRawR() {
+	if ctx.rawRReleaseFunc != nil {
+		ctx.rawRReleaseFunc()
+		ctx.rawR = nil
+		ctx.rawRReleaseFunc = nil
+	}
+}
+
 func (ctx *Context) Id() uint32 {
 	return ctx.id
 }
 
-// StartTime returns the time when the Context was created.
 func (ctx *Context) StartTime() time.Time {
 	return ctx.startTime
 }
 
-// InfoField returns a zap.Field.
-// Just for convenience.
 func (ctx *Context) InfoField() zap.Field {
 	return zap.Stringer("query", ctx)
 }
 
-// Copy deep copies this Context.
 func (ctx *Context) Copy() *Context {
 	newCtx := new(Context)
 	ctx.CopyTo(newCtx)
 	return newCtx
 }
 
-// CopyTo deep copies this Context to d.
+// CopyTo deep copies the logical state. 
+// rawR is NOT copied as it belongs to the transport layer and pooled buffers.
 func (ctx *Context) CopyTo(d *Context) *Context {
 	d.startTime = ctx.startTime
 	d.q = ctx.q.Copy()
@@ -228,13 +190,13 @@ func (ctx *Context) CopyTo(d *Context) *Context {
 	if r := ctx.r; r != nil {
 		d.r = r.Copy()
 	}
+
 	for m := range ctx.marks {
 		d.AddMark(m)
 	}
 	return d
 }
 
-// AddMark adds mark m to this Context.
 func (ctx *Context) AddMark(m uint) {
 	if ctx.marks == nil {
 		ctx.marks = make(map[uint]struct{})
@@ -242,7 +204,6 @@ func (ctx *Context) AddMark(m uint) {
 	ctx.marks[m] = struct{}{}
 }
 
-// HasMark reports whether this Context has mark m.
 func (ctx *Context) HasMark(m uint) bool {
 	_, ok := ctx.marks[m]
 	return ok
