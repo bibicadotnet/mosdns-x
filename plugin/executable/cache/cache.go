@@ -39,16 +39,19 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 	packet, storedTime, offsets, count, lazyHit, ok := c.backend.Get(key)
 	if ok {
 		now := time.Now().Unix()
+		// Acquire a buffer from the pool to avoid heap allocation
 		buf := pool.GetBuf(len(packet))
 		respRaw := buf.Bytes()[:len(packet)]
 		copy(respRaw, packet)
 
-		// 1. Patch Message ID (2 byte đầu) - Luôn phải làm vì ID thay đổi theo từng request
+		// 1. Patch Message ID (first 2 bytes)
+		// DNS ID must match the current request
 		binary.BigEndian.PutUint16(respRaw[:2], q.Id)
 
-		// 2. Patch TTL logic - O(1) nhờ ExtractTTLOffsets đã chạy lúc Store
+		// 2. Patch TTL logic - O(1) using pre-calculated offsets
 		n := int(count)
 		if lazyHit {
+			// Use fixed stale TTL for lazy cache hits
 			lTTL := uint32(c.args.LazyCacheReplyTTL)
 			if lTTL == 0 {
 				lTTL = 5
@@ -56,8 +59,10 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 			for i := 0; i < n; i++ {
 				binary.BigEndian.PutUint32(respRaw[offsets[i]:], lTTL)
 			}
+			// Trigger background update for lazy cache
 			c.doLazyUpdate(key, qCtx, next)
 		} else {
+			// Subtract elapsed time from original TTLs
 			delta := now - storedTime
 			if delta < 0 {
 				delta = 0
@@ -74,8 +79,8 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 			}
 		}
 
-		// 3. Handle Truncate & TC Bit (Dành cho UDP Fast-path)
-		// Phải làm ở đây vì Transport layer không còn biết logic EDNS/Truncate
+		// 3. Handle Truncation & TC Bit (Specific to UDP Fast-path)
+		// Since the transport layer is now "dumb", business logic must be handled here
 		maxSize := 512
 		if opt := q.IsEdns0(); opt != nil {
 			maxSize = int(opt.UDPSize())
@@ -88,20 +93,19 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 		if isUDP && len(respRaw) > maxSize {
 			respRaw = respRaw[:maxSize]
 			if len(respRaw) >= 3 {
-				respRaw[2] |= 0x02 // Set TC (Truncated) bit
+				// Set TC (Truncated) bit: Byte 2, Bit 1 (0x02)
+				respRaw[2] |= 0x02 
 			}
 		}
 
-		// KÍCH HOẠT ZERO-UNPACK: Đẩy thẳng byte thô đã patch xong xuôi
+		// ACTIVATE ZERO-UNPACK: Pass raw bytes directly to the transport layer
+		// Do NOT call SetResponse(msg) after this, as it will clear RawR and releaseFunc
 		qCtx.SetRawResponse(respRaw, func() {
-			buf.Release()
+			buf.Release() // Buffer is returned to the pool after the socket write is done
 		})
 
-		// Placeholder response để các plugin log/metrics phía sau không bị lỗi
-		msg := new(dns.Msg)
-		msg.SetReply(q)
-		qCtx.SetResponse(msg)
-
+		// Return nil to terminate the plugin chain immediately.
+		// The server layer (UDP/TCP) will detect RawR and use the fast-path.
 		return nil
 	}
 
@@ -114,6 +118,7 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 }
 
 func (c *cachePlugin) tryStore(key string, r *dns.Msg) {
+	// Skip caching if the response is truncated or an error (other than NXDOMAIN)
 	if (r.Rcode != dns.RcodeSuccess && r.Rcode != dns.RcodeNameError) || r.Truncated {
 		return
 	}
@@ -131,6 +136,7 @@ func (c *cachePlugin) tryStore(key string, r *dns.Msg) {
 		minTTL = 300
 	}
 
+	// Pre-extract TTL offsets to enable O(1) patching during cache hits
 	offsets, count := dnsutils.ExtractTTLOffsets(packed)
 	now := time.Now().Unix()
 	expire := now + int64(minTTL)
@@ -140,6 +146,7 @@ func (c *cachePlugin) tryStore(key string, r *dns.Msg) {
 }
 
 func (c *cachePlugin) doLazyUpdate(key string, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
+	// Prevent duplicate background updates for the same key
 	c.lazyUpdateSF.DoChan(key, func() (interface{}, error) {
 		defer c.lazyUpdateSF.Forget(key)
 		lQCtx := qCtx.Copy()
