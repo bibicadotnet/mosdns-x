@@ -15,6 +15,12 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+const PluginType = "cache"
+
+func init() {
+	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(Args) })
+}
+
 type Args struct {
 	Size              int  `yaml:"size"`
 	LazyCacheTTL      int  `yaml:"lazy_cache_ttl"`
@@ -29,6 +35,22 @@ type cachePlugin struct {
 	lazyUpdateSF singleflight.Group
 }
 
+func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
+	arg := args.(*Args)
+
+	// Xử lý cleaner_interval: chuyển từ int (giây) sang time.Duration
+	interval := 60 * time.Second
+	if arg.CleanerInterval != nil && *arg.CleanerInterval > 0 {
+		interval = time.Duration(*arg.CleanerInterval) * time.Second
+	}
+
+	return &cachePlugin{
+		BP:      bp,
+		args:    arg,
+		backend: mem_cache.NewMemCache(arg.Size, interval),
+	}, nil
+}
+
 func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	q := qCtx.Q()
 	key, _ := dnsutils.GetMsgKey(q)
@@ -39,32 +61,23 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 	packet, storedTime, offsets, count, lazyHit, ok := c.backend.Get(key)
 	if ok {
 		now := time.Now().Unix()
-		
-		// Acquire a buffer from the pool to minimize heap allocations
 		buf := pool.GetBuf(len(packet))
 		respRaw := buf.Bytes()[:len(packet)]
 		copy(respRaw, packet)
 
-		// 1. Patch Message ID (first 2 bytes) to match the current query
+		// 1. Patch Message ID
 		binary.BigEndian.PutUint16(respRaw[:2], q.Id)
 
-		// 2. TTL (Time To Live) patching using pre-calculated offsets
+		// 2. Patch TTL
 		n := int(count)
 		if lazyHit {
-			// Apply fixed stale TTL for lazy cache responses
 			lTTL := uint32(c.args.LazyCacheReplyTTL)
-			if lTTL == 0 {
-				lTTL = 5
-			}
+			if lTTL == 0 { lTTL = 5 }
 			for i := 0; i < n; i++ {
 				binary.BigEndian.PutUint32(respRaw[offsets[i]:], lTTL)
 			}
-			
-			// Snapshot the context on the main goroutine to prevent data races
-			// before triggering the background asynchronous update
 			c.doLazyUpdate(key, qCtx, next)
 		} else {
-			// Calculate effective TTL by subtracting elapsed time since storage
 			elapsed := uint32(now - storedTime)
 			for i := 0; i < n; i++ {
 				off := offsets[i]
@@ -77,7 +90,7 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 			}
 		}
 
-		// 3. Handle DNS message truncation for UDP protocol
+		// 3. Handle UDP Truncation
 		maxSize := 512
 		if opt := q.IsEdns0(); opt != nil {
 			maxSize = int(opt.UDPSize())
@@ -86,26 +99,19 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 			maxSize = dns.MinMsgSize
 		}
 
-		isUDP := qCtx.ReqMeta().GetProtocol() == query_context.ProtocolUDP
-		if isUDP && len(respRaw) > maxSize {
+		if qCtx.ReqMeta().GetProtocol() == query_context.ProtocolUDP && len(respRaw) > maxSize {
 			respRaw = respRaw[:maxSize]
 			if len(respRaw) >= 3 {
-				// Set TC (Truncated) bit in the DNS Header (Byte 2, Bit 1)
 				respRaw[2] |= 0x02 
 			}
 		}
 
-		// Activate Zero-Unpack fast path by passing raw bytes to the transport layer.
-		// The release callback ensures the buffer returns to the pool after the socket write.
 		qCtx.SetRawResponse(respRaw, func() {
 			buf.Release() 
 		})
-
-		// Terminate execution chain and return immediately to bypass downstream plugins
 		return nil
 	}
 
-	// Cache Miss: proceed with the execution chain and attempt to store the result
 	err := executable_seq.ExecChainNode(ctx, qCtx, next)
 	if err == nil && qCtx.R() != nil {
 		c.tryStore(key, qCtx.R())
@@ -114,25 +120,13 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 }
 
 func (c *cachePlugin) tryStore(key string, r *dns.Msg) {
-	// Do not cache truncated responses or errors (excluding NXDOMAIN/NODATA)
 	if (r.Rcode != dns.RcodeSuccess && r.Rcode != dns.RcodeNameError) || r.Truncated {
 		return
 	}
-
-	packed, err := r.Pack()
-	if err != nil {
-		return
-	}
-
+	packed, _ := r.Pack()
 	minTTL := dnsutils.GetMinimalTTL(r)
-	if minTTL == 0 && len(r.Answer) > 0 {
-		return
-	}
-	if minTTL == 0 {
-		minTTL = 300
-	}
+	if minTTL == 0 { minTTL = 300 }
 
-	// Extract TTL offsets for Answer and Authority sections to enable O(1) patching
 	offsets, count := dnsutils.ExtractTTLOffsets(packed)
 	now := time.Now().Unix()
 	expire := now + int64(minTTL)
@@ -142,18 +136,11 @@ func (c *cachePlugin) tryStore(key string, r *dns.Msg) {
 }
 
 func (c *cachePlugin) doLazyUpdate(key string, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
-	// Deep copy logical state to isolate the background task from the current request.
-	// Note: rawR and releaseFunc are not copied, preventing buffer lifetime issues.
 	lQCtx := qCtx.Copy()
-
 	c.lazyUpdateSF.DoChan(key, func() (interface{}, error) {
 		defer c.lazyUpdateSF.Forget(key)
-		
-		// Establish a dedicated timeout for the background refresh task
 		bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-
-		// Re-execute the downstream chain to update the cache with fresh data
 		if err := executable_seq.ExecChainNode(bgCtx, lQCtx, next); err == nil && lQCtx.R() != nil {
 			c.tryStore(key, lQCtx.R())
 		}
