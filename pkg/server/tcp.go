@@ -135,15 +135,53 @@ func (s *Server) handleQueryTcp(ctx context.Context, c *TCPConn, req *dns.Msg, t
 	qCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	r, err := c.ServeDNS(qCtx, req)
+	// 1. Khởi tạo Context để quản lý kết quả
+	queryCtx := C.NewContext(req, c.meta)
+
+	var err error
+	// 🚀 Ưu tiên gọi RawHandler
+	if rawH, ok := c.handler.(dns_handler.RawHandler); ok {
+		err = rawH.ServeDNSRaw(qCtx, queryCtx)
+	} else {
+		// Fallback Legacy
+		var r *dns.Msg
+		r, err = c.handler.ServeDNS(qCtx, req, c.meta)
+		if r != nil {
+			queryCtx.SetResponse(r)
+		}
+	}
+
 	if err != nil {
 		s.opts.Logger.Debug("handler err", zap.Error(err))
 		return
 	}
 
+	// ===== FAST PATH (Zero-Unpack) =====
+	// Gửi thẳng byte thô. Patch ID/TTL/RA đã được xử lý ở Plugin Layer.
+	if raw := queryCtx.RawR(); raw != nil {
+		_, err = c.WriteRawMsg(raw)
+		queryCtx.ReleaseRawR()
+		if err != nil {
+			s.opts.Logger.Debug("failed to write raw response", zap.Stringer("client", c.RemoteAddr()), zap.Error(err))
+		}
+		return
+	}
+
+	// ===== LEGACY PATH =====
+	// Dành cho các plugin vẫn trả về dns.Msg
+	r := queryCtx.R()
+	if r == nil {
+		return
+	}
+
+	// Patch ID cuối cùng cho legacy plugin
+	r.Id = req.Id
+	// Lưu ý: Không patch RA flag ở đây vì đã được EntryHandler lo liệu.
+	// TCP không cần truncate.
+
 	b, buf, err := pool.PackBuffer(r)
 	if err != nil {
-		s.opts.Logger.Error("failed to unpack handler's response", zap.Error(err), zap.Stringer("msg", r))
+		s.opts.Logger.Error("failed to pack response", zap.Error(err), zap.Stringer("msg", r))
 		return
 	}
 	defer buf.Release()
