@@ -21,6 +21,8 @@ func init() {
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(Args) })
 }
 
+var _ coremain.ExecutablePlugin = (*cachePlugin)(nil)
+
 type Args struct {
 	Size              int  `yaml:"size"`
 	LazyCacheTTL      int  `yaml:"lazy_cache_ttl"`
@@ -37,8 +39,6 @@ type cachePlugin struct {
 
 func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
 	arg := args.(*Args)
-
-	// Xử lý cleaner_interval: chuyển từ int (giây) sang time.Duration
 	interval := 60 * time.Second
 	if arg.CleanerInterval != nil && *arg.CleanerInterval > 0 {
 		interval = time.Duration(*arg.CleanerInterval) * time.Second
@@ -65,14 +65,14 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 		respRaw := buf.Bytes()[:len(packet)]
 		copy(respRaw, packet)
 
-		// 1. Patch Message ID
 		binary.BigEndian.PutUint16(respRaw[:2], q.Id)
 
-		// 2. Patch TTL
 		n := int(count)
 		if lazyHit {
 			lTTL := uint32(c.args.LazyCacheReplyTTL)
-			if lTTL == 0 { lTTL = 5 }
+			if lTTL == 0 {
+				lTTL = 5
+			}
 			for i := 0; i < n; i++ {
 				binary.BigEndian.PutUint32(respRaw[offsets[i]:], lTTL)
 			}
@@ -90,7 +90,6 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 			}
 		}
 
-		// 3. Handle UDP Truncation
 		maxSize := 512
 		if opt := q.IsEdns0(); opt != nil {
 			maxSize = int(opt.UDPSize())
@@ -102,12 +101,12 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 		if qCtx.ReqMeta().GetProtocol() == query_context.ProtocolUDP && len(respRaw) > maxSize {
 			respRaw = respRaw[:maxSize]
 			if len(respRaw) >= 3 {
-				respRaw[2] |= 0x02 
+				respRaw[2] |= 0x02
 			}
 		}
 
 		qCtx.SetRawResponse(respRaw, func() {
-			buf.Release() 
+			buf.Release()
 		})
 		return nil
 	}
@@ -125,7 +124,9 @@ func (c *cachePlugin) tryStore(key string, r *dns.Msg) {
 	}
 	packed, _ := r.Pack()
 	minTTL := dnsutils.GetMinimalTTL(r)
-	if minTTL == 0 { minTTL = 300 }
+	if minTTL == 0 {
+		minTTL = 300
+	}
 
 	offsets, count := dnsutils.ExtractTTLOffsets(packed)
 	now := time.Now().Unix()
@@ -146,4 +147,11 @@ func (c *cachePlugin) doLazyUpdate(key string, qCtx *query_context.Context, next
 		}
 		return nil, nil
 	})
+}
+
+func (c *cachePlugin) Shutdown() error {
+	if c.backend != nil {
+		return c.backend.Close()
+	}
+	return nil
 }
