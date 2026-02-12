@@ -14,7 +14,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ * along with this program.  See the <https://www.gnu.org/licenses/>.
  */
 
 package server
@@ -29,6 +29,7 @@ import (
 
 	"github.com/pmkol/mosdns-x/pkg/pool"
 	C "github.com/pmkol/mosdns-x/pkg/query_context"
+	"github.com/pmkol/mosdns-x/pkg/server/dns_handler"
 	"github.com/pmkol/mosdns-x/pkg/utils"
 )
 
@@ -90,17 +91,48 @@ func (s *Server) ServeUDP(c net.PacketConn) error {
 		go func() {
 			meta := C.NewRequestMeta(clientAddr)
 			meta.SetProtocol(C.ProtocolUDP)
+			qCtx := C.NewContext(q, meta)
 
-			r, err := handler.ServeDNS(listenerCtx, q, meta)
+			var err error
+			// 🚀 Ưu tiên gọi RawHandler để kích hoạt Zero-Unpack
+			if rawH, ok := handler.(dns_handler.RawHandler); ok {
+				err = rawH.ServeDNSRaw(listenerCtx, qCtx)
+			} else {
+				// Legacy Path
+				r, e := handler.ServeDNS(listenerCtx, q, meta)
+				err = e
+				if r != nil {
+					qCtx.SetResponse(r)
+				}
+			}
+
 			if err != nil {
 				s.opts.Logger.Warn("handler err", zap.Error(err))
 				return
 			}
-			if r != nil {
+
+			// ===== FAST PATH (Zero-Unpack) =====
+			// Nếu đã có raw bytes (đã được patch ID/TTL/TC ở plugin layer), gửi thẳng luôn
+			if raw := qCtx.RawR(); raw != nil {
+				if _, err := cmc.writeTo(raw, localAddr, ifIndex, remoteAddr); err != nil {
+					s.opts.Logger.Warn("failed to write raw response", zap.Stringer("client", remoteAddr), zap.Error(err))
+				}
+				qCtx.ReleaseRawR()
+				return
+			}
+
+			// ===== LEGACY PATH =====
+			// Fallback đóng gói dns.Msg nếu không có raw bytes
+			if r := qCtx.R(); r != nil {
+				r.Id = q.Id
+				if s.opts.RecursionAvailable {
+					r.RecursionAvailable = true
+				}
 				r.Truncate(getUDPSize(q))
+
 				b, buf, err := pool.PackBuffer(r)
 				if err != nil {
-					s.opts.Logger.Error("failed to unpack handler's response", zap.Error(err), zap.Stringer("msg", r))
+					s.opts.Logger.Error("failed to pack handler's response", zap.Error(err), zap.Stringer("msg", r))
 					return
 				}
 				defer buf.Release()
