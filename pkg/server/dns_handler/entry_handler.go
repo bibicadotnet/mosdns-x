@@ -30,6 +30,11 @@ type Handler interface {
 	ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error)
 }
 
+// RawHandler defines a high-performance interface for Zero-Unpack processing.
+type RawHandler interface {
+	ServeDNSRaw(ctx context.Context, qCtx *query_context.Context) error
+}
+
 type EntryHandlerOpts struct {
 	Logger             *zap.Logger
 	Entry              executable_seq.Executable
@@ -59,12 +64,19 @@ func NewEntryHandler(opts EntryHandlerOpts) (Handler, error) {
 	return &EntryHandler{opts: opts}, nil
 }
 
+// ServeDNSRaw implements the RawHandler interface.
+// It is a pure execution pipe without validation or timeout logic.
+func (h *EntryHandler) ServeDNSRaw(ctx context.Context, qCtx *query_context.Context) error {
+	return h.opts.Entry.Exec(ctx, qCtx, nil)
+}
+
+// ServeDNS is the legacy entry point with full validation and timeout management.
 func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error) {
 	// 1. Independent per-query timeout context
-	qCtx, cancel := context.WithTimeout(ctx, h.opts.QueryTimeout)
+	timeoutCtx, cancel := context.WithTimeout(ctx, h.opts.QueryTimeout)
 	defer cancel()
 
-	// 2. Format validation
+	// 2. Request Validation
 	if len(req.Question) == 0 {
 		h.opts.Logger.Debug("request has zero question")
 		return h.responseFormErr(req), nil
@@ -76,14 +88,12 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 		}
 	}
 
-	origID := req.Id
 	queryCtx := query_context.NewContext(req, meta)
 
-	// 3. Execution
-	err := h.opts.Entry.Exec(qCtx, queryCtx, nil)
-	respMsg := queryCtx.R()
+	// 3. Call the raw execution pipe
+	err := h.ServeDNSRaw(timeoutCtx, queryCtx)
 
-	// 4. Smart Logging (No spam for client cancellations/timeouts)
+	// 4. Logging behavior restored to original
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			h.opts.Logger.Debug("query interrupted", queryCtx.InfoField(), zap.Error(err))
@@ -92,7 +102,24 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 		}
 	}
 
-	// 5. Response Finalization
+	respMsg := queryCtx.R()
+
+	// 5. Legacy Raw Fallback: If plugin set RawR but server needs *dns.Msg
+	if respMsg == nil {
+		if raw := queryCtx.RawR(); raw != nil {
+			respMsg = new(dns.Msg)
+			if unpackErr := respMsg.Unpack(raw); unpackErr != nil {
+				h.opts.Logger.Error("failed to unpack rawR in legacy path", zap.Error(unpackErr))
+				respMsg = nil
+			} else {
+				// Immediate ID patch for safety
+				respMsg.Id = req.Id
+			}
+			queryCtx.ReleaseRawR()
+		}
+	}
+
+	// 6. Finalization & Safety
 	if respMsg == nil {
 		if err == nil {
 			h.opts.Logger.Error("entry returned with nil response", queryCtx.InfoField())
@@ -111,9 +138,8 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 	if h.opts.RecursionAvailable {
 		respMsg.RecursionAvailable = true
 	}
-	respMsg.Id = origID
+	respMsg.Id = req.Id // Final safety re-patch
 
-	// Always return nil error to prevent server from killing TCP/DoT connections
 	return respMsg, nil
 }
 
