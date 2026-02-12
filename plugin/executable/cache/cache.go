@@ -19,6 +19,11 @@ const PluginType = "cache"
 
 func init() {
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(Args) })
+
+	// Reg default preset
+	coremain.RegNewPersetPluginFunc("_default_cache", func(bp *coremain.BP) (coremain.Plugin, error) {
+		return newCachePlugin(bp, &Args{})
+	})
 }
 
 var _ coremain.ExecutablePlugin = (*cachePlugin)(nil)
@@ -38,16 +43,19 @@ type cachePlugin struct {
 }
 
 func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
-	arg := args.(*Args)
+	return newCachePlugin(bp, args.(*Args))
+}
+
+func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 	interval := 60 * time.Second
-	if arg.CleanerInterval != nil && *arg.CleanerInterval > 0 {
-		interval = time.Duration(*arg.CleanerInterval) * time.Second
+	if args.CleanerInterval != nil && *args.CleanerInterval > 0 {
+		interval = time.Duration(*args.CleanerInterval) * time.Second
 	}
 
 	return &cachePlugin{
 		BP:      bp,
-		args:    arg,
-		backend: mem_cache.NewMemCache(arg.Size, interval),
+		args:    args,
+		backend: mem_cache.NewMemCache(args.Size, interval),
 	}, nil
 }
 
