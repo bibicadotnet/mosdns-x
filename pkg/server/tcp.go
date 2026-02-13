@@ -67,7 +67,9 @@ func (s *Server) ServeTCP(l net.Listener) error {
 			if s.Closed() {
 				return ErrServerClosed
 			}
-			if err, ok := err.(net.Error); ok && err.Temporary() {
+			// Only continue if it's a net.Error timeout. 
+			// Other fatal errors return to let the supervisor restart the process.
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
 			return fmt.Errorf("unexpected listener err: %w", err)
@@ -117,6 +119,7 @@ func (s *Server) handleConnectionTcp(ctx context.Context, c *TCPConn) {
 		idleTimeout = defaultTCPIdleTimeout
 	}
 
+	// Use Go 1.21+ built-in min
 	c.SetReadDeadline(time.Now().Add(min(idleTimeout, tcpFirstReadTimeout)))
 
 	for {
@@ -153,11 +156,4 @@ func (s *Server) handleQueryTcp(ctx context.Context, c *TCPConn, req *dns.Msg, t
 		s.opts.Logger.Debug("failed to write response", zap.Stringer("client", c.RemoteAddr()), zap.Error(err))
 		return
 	}
-}
-
-func min(a, b time.Duration) time.Duration {
-	if a < b {
-		return a
-	}
-	return b
 }
