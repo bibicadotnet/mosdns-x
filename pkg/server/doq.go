@@ -41,16 +41,14 @@ type quicCloser struct {
 }
 
 func (c *quicCloser) Close() error {
-	if c.closed {
-		return nil
-	}
-	return c.conn.CloseWithError(1, "")
+	return c.close(1)
 }
 
 func (c *quicCloser) close(code quic.ApplicationErrorCode) error {
 	if c.closed {
 		return nil
 	}
+	c.closed = true
 	return c.conn.CloseWithError(code, "")
 }
 
@@ -69,7 +67,7 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 
 	firstReadTimeout := tcpFirstReadTimeout
 	idleTimeout := s.opts.IdleTimeout
-	if idleTimeout == 0 {
+	if idleTimeout <= 0 {
 		idleTimeout = defaultQUICIdleTimeout
 	}
 	if idleTimeout < firstReadTimeout {
@@ -138,7 +136,7 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 					b, buf, err := pool.PackBuffer(r)
 					if err != nil {
 						stream.CancelWrite(1)
-						s.opts.Logger.Error("failed to unpack handler's response", zap.Error(err), zap.Stringer("msg", r))
+						s.opts.Logger.Error("failed to pack handler's response", zap.Error(err), zap.Stringer("msg", r))
 						return
 					}
 					defer buf.Release()
