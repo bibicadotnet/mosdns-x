@@ -68,15 +68,12 @@ def go_build():
         suffix = '.exe' if os_env['GOOS'] == 'windows' else ''
         bin_filename = PROJECT_NAME + suffix
 
-        # PIE is only meaningful on Linux
-        buildmode = "-buildmode=pie" if os_env['GOOS'] == 'linux' else ""
-
         logger.info(f'building {zip_filename}')
         try:
             # FIX: Using ../default.pgo because we are inside RELEASE_DIR
             # Optimized flag order for compiler efficiency
             subprocess.check_call(
-                f'go build {buildmode} '
+                f'go build '
                 f'-pgo=../default.pgo '
                 f'-trimpath '
                 f'-ldflags "-s -w -buildid= '
