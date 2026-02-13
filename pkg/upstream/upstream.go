@@ -316,6 +316,10 @@ func createTLSConfig(opt *Opt, alpn string, serverName string) *tls.Config {
 		NextProtos:         []string{alpn},
 		ServerName:         serverName,
 		ClientSessionCache: tls.NewLRUClientSessionCache(64),
+		CurvePreferences: []tls.CurveID{
+			tls.X25519,
+			tls.CurveP256,
+		},
 	}
 	return config
 }
@@ -329,6 +333,10 @@ func createETLSConfig(opt *Opt, alpn string, serverName string) *eTLS.Config {
 		NextProtos:         []string{alpn},
 		ServerName:         serverName,
 		ClientSessionCache: eTLS.NewLRUClientSessionCache(64),
+		CurvePreferences: []eTLS.CurveID{
+			eTLS.X25519,
+			eTLS.CurveP256,
+		},
 	}
 	return config
 }
