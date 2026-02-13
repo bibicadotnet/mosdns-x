@@ -60,8 +60,15 @@ func NewEntryHandler(opts EntryHandlerOpts) (Handler, error) {
 }
 
 func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error) {
-	// 1. Independent per-query timeout context
-	qCtx, cancel := context.WithTimeout(ctx, h.opts.QueryTimeout)
+	// 1. Optimization: Reuse parent context if it has a stricter deadline 
+	// to avoid unnecessary context allocations and timer overhead.
+	qCtx := ctx
+	cancel := func() {}
+
+	ddl := time.Now().Add(h.opts.QueryTimeout)
+	if d, ok := ctx.Deadline(); !ok || d.After(ddl) {
+		qCtx, cancel = context.WithDeadline(ctx, ddl)
+	}
 	defer cancel()
 
 	// 2. Format validation
