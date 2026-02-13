@@ -77,11 +77,11 @@ func (c *MemCache) Store(key string, v []byte, storedTime, expirationTime time.T
 		return
 	}
 
-	buf := make([]byte, len(v))
-	copy(buf, v)
-
 	c.lru.Add(key, &elem{
-		v:  buf,
+		// The caller is responsible for not mutating v after Store returns.
+		// This allows the cache backend to avoid an extra copy and improves
+		// performance for high-throughput scenarios.
+		v:  v,
 		st: storedTime.Unix(),
 		ex: expirationTime.Unix(),
 	})
