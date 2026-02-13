@@ -263,7 +263,9 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 }
 
 func (c *cachePlugin) doLazyUpdate(msgKey string, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
-	lazyQCtx := qCtx.Copy()
+	// Use a lightweight background copy to avoid unnecessary allocations
+	// while still isolating the lazy update pipeline from the original Context.
+	lazyQCtx := qCtx.ShallowCopyForBackground()
 	lazyUpdateFunc := func() (interface{}, error) {
 		c.L().Debug("start lazy cache update", lazyQCtx.InfoField())
 		defer c.lazyUpdateSF.Forget(msgKey)
