@@ -131,7 +131,9 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 			}
 			conn, err = config.ListenPacket(ctx, "unixgram", cfg.Addr)
 			if !abstract {
-				os.Chmod(cfg.Addr, 0x777)
+				if err := os.Chmod(cfg.Addr, 0777); err != nil {
+					m.logger.Warn("failed to chmod unix socket", zap.String("addr", cfg.Addr), zap.Error(err))
+				}
 			}
 		} else {
 			conn, err = config.ListenPacket(ctx, "udp", cfg.Addr)
@@ -164,7 +166,9 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 			}
 			l, err = config.Listen(ctx, "unix", cfg.Addr)
 			if !abstract {
-				os.Chmod(cfg.Addr, 0x777)
+				if err := os.Chmod(cfg.Addr, 0777); err != nil {
+					m.logger.Warn("failed to chmod unix socket", zap.String("addr", cfg.Addr), zap.Error(err))
+				}
 			}
 		} else {
 			l, err = config.Listen(ctx, "tcp", cfg.Addr)
@@ -195,6 +199,10 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 		}
 	default:
 		return fmt.Errorf("unknown protocol: [%s]", cfg.Protocol)
+	}
+
+	if run == nil {
+		return fmt.Errorf("failed to init runner for protocol %s", cfg.Protocol)
 	}
 
 	m.sc.Attach(func(done func(), closeSignal <-chan struct{}) {
