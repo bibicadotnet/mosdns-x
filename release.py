@@ -7,7 +7,6 @@ import subprocess
 import zipfile
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-upx", action="store_true")
 parser.add_argument("-i", type=int)
 args = parser.parse_args()
 
@@ -86,12 +85,6 @@ def go_build():
                 f'-o {bin_filename} ../', 
                 shell=True,
                 env=os_env)
-
-            if args.upx:
-                try:
-                    subprocess.check_call(f'upx -9 -q {bin_filename}', shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-                except Exception as e:
-                    logger.error(f'upx failed: {e}')
 
             with zipfile.ZipFile(zip_filename, mode='w', compression=zipfile.ZIP_DEFLATED, compresslevel=5) as zf:
                 zf.write(bin_filename)
