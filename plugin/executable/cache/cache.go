@@ -311,9 +311,7 @@ func (c *cachePlugin) tryStoreMsg(key string, r *dns.Msg) error {
 		expirationTime = now.Add(time.Duration(minTTL) * time.Second)
 	}
 	if c.args.CompressResp {
-		compressBuf := pool.GetBuf(snappy.MaxEncodedLen(len(v)))
-		v = snappy.Encode(compressBuf.Bytes(), v)
-		defer compressBuf.Release()
+		v = snappy.Encode(nil, v)
 	}
 	c.backend.Store(key, v, now, expirationTime)
 	return nil
