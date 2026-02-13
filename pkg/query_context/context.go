@@ -217,6 +217,27 @@ func (ctx *Context) Copy() *Context {
 	return newCtx
 }
 
+// ShallowCopyForBackground creates a lightweight copy of this Context
+// intended for background tasks (such as lazy cache refresh).
+// It:
+//   - deep-copies the current query message (ctx.q.Copy()),
+//   - reuses the originalQuery and request metadata references,
+//   - reuses the same id and startTime,
+//   - does NOT copy the response or marks map.
+//
+// This avoids unnecessary allocations when the caller only needs to
+// execute the pipeline again with the same query, without sharing
+// response or marks state with the original Context.
+func (ctx *Context) ShallowCopyForBackground() *Context {
+	return &Context{
+		startTime:     ctx.startTime,
+		q:             ctx.q.Copy(),
+		originalQuery: ctx.originalQuery,
+		reqMeta:       ctx.reqMeta,
+		id:            ctx.id,
+	}
+}
+
 // CopyTo deep copies this Context to d.
 func (ctx *Context) CopyTo(d *Context) *Context {
 	d.startTime = ctx.startTime
