@@ -13,6 +13,7 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/pmkol/mosdns-x/coremain"
+	"github.com/pmkol/mosdns-x/pkg/dnsutils"
 	"github.com/pmkol/mosdns-x/pkg/executable_seq"
 	"github.com/pmkol/mosdns-x/pkg/query_context"
 )
@@ -55,9 +56,8 @@ func (p *preReject) Exec(ctx context.Context, qCtx *query_context.Context, next 
 		return nil
 
 	case dns.TypeAAAA, dns.TypePTR, dns.TypeHTTPS: // Drop IPv6, PTR, and HTTPS records early
-		r := new(dns.Msg)
-		r.SetReply(q)
-		qCtx.SetResponse(r) // Return empty NOERROR (NODATA)
+		// Return empty NOERROR (NODATA) with SOA for negative caching
+		qCtx.SetResponse(dnsutils.GenEmptyReply(q, dns.RcodeSuccess))
 		return nil
 	}
 
@@ -90,9 +90,7 @@ func (p *preReject) Exec(ctx context.Context, qCtx *query_context.Context, next 
 }
 
 func (p *preReject) rejectNX(q *dns.Msg, qCtx *query_context.Context) error {
-	r := new(dns.Msg)
-	r.SetReply(q)
-	r.Rcode = dns.RcodeNameError // Return NXDOMAIN for incomplete/malformed domains
-	qCtx.SetResponse(r)
+	// Return NXDOMAIN with SOA for negative caching
+	qCtx.SetResponse(dnsutils.GenEmptyReply(q, dns.RcodeNameError))
 	return nil
 }
