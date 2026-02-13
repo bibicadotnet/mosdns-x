@@ -82,7 +82,7 @@ def go_build():
         logger.info(f'building {zip_filename}')
         try:
             subprocess.check_call(
-                f'go build -ldflags "-s -w -buildid= -X github.com/pmkol/mosdns-x/constant.Version={VERSION} -X github.com/pmkol/mosdns-x/constant.BuildTime={BuildTime}" -trimpath -o {bin_filename} ../', shell=True,
+                f'go build -pgo=auto -ldflags "-s -w -buildid= -X github.com/pmkol/mosdns-x/constant.Version={VERSION} -X github.com/pmkol/mosdns-x/constant.BuildTime={BuildTime}" -trimpath -o {bin_filename} ../', shell=True,
                 env=os_env)
 
             if args.upx:
