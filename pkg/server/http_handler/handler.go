@@ -2,11 +2,6 @@
  * Copyright (C) 2020-2022, IrineSistiana
  *
  * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
  */
 
 package http_handler
@@ -20,7 +15,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"reflect"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -72,6 +66,7 @@ func (h *Handler) warnErr(req Request, err error) {
 	h.opts.Logger.Warn(err.Error(), zap.String("from", req.GetRemoteAddr()), zap.String("method", req.Method()), zap.String("url", req.RequestURI()))
 }
 
+// Interfaces to abstract http/http3 requests
 type ResponseWriter interface {
 	Header() Header
 	Write([]byte) (int, error)
@@ -102,6 +97,7 @@ type TlsInfo struct {
 }
 
 func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
+	// Initialize RequestMeta with proper IP unmapping (IPv4-in-IPv6 support)
 	meta := new(C.RequestMeta)
 	if addr, err := getRemoteAddr(req, h.opts.SrcIPHeader); err == nil {
 		meta.SetClientAddr(addr)
@@ -121,14 +117,14 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 		meta.SetProtocol(C.ProtocolHTTP)
 	}
 
-	// 1. Health check - Always allow
+	// 1. Health check - Fast path
 	if h.opts.HealthPath != "" && req.URL().Path == h.opts.HealthPath {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		_, _ = w.Write([]byte("OK"))
 		return
 	}
 
-	// 2. Path & Root validation - Redirect browsers/scanners early
+	// 2. Path & Root validation - Anti-scanner redirection
 	if (len(h.opts.Path) != 0 && req.URL().Path != h.opts.Path) || req.URL().Path == "/" {
 		if h.opts.RedirectURL != "" {
 			w.Header().Set("Location", h.opts.RedirectURL)
@@ -144,9 +140,9 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 
 	switch req.Method() {
 	case http.MethodGet:
-		// 3. GET validation - Silent redirect for non-DoH Accept headers
+		// 3. GET validation - RFC 8484 compliance
 		accept := req.Header().Get("Accept")
-		var matched bool
+		matched := false
 		for _, v := range strings.Split(accept, ",") {
 			mediatype := strings.TrimSpace(strings.SplitN(v, ";", 2)[0])
 			if mediatype == "application/dns-message" {
@@ -168,28 +164,37 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 		s := req.URL().Query().Get("dns")
 		if len(s) == 0 {
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte("no dns param"))
+			return
+		}
+
+		// Security: Pre-check decoded length to prevent oversized memory allocation
+		if base64.RawURLEncoding.DecodedLen(len(s)) > dns.MaxMsgSize {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			return
 		}
 
 		b, err = base64.RawURLEncoding.DecodeString(s)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			h.warnErr(req, fmt.Errorf("decode base64 failed: %s", err))
+			h.warnErr(req, fmt.Errorf("decode base64 failed: %w", err))
 			return
 		}
 
 	case http.MethodPost:
-		// 4. POST validation - RFC 8484 strictly requires 4xx, no redirect
+		// 4. POST validation - Strict RFC 8484
 		if contentType := req.Header().Get("Content-Type"); contentType != "application/dns-message" {
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte("invalid Content-Type"))
 			return
 		}
 
-		b, err = io.ReadAll(req.Body())
+		// Security: Use LimitReader to prevent OOM from malicious large bodies
+		b, err = io.ReadAll(io.LimitReader(req.Body(), dns.MaxMsgSize+1))
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(b) > dns.MaxMsgSize {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			return
 		}
 
@@ -198,75 +203,78 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 		return
 	}
 
-	// 5. DNS Unpack and Processing
+	// 5. DNS Processing
 	m := new(dns.Msg)
 	if err := m.Unpack(b); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		h.warnErr(req, fmt.Errorf("unpack dns msg failed: %s", err))
+		h.warnErr(req, fmt.Errorf("unpack dns msg failed: %w", err))
 		return
 	}
 
 	r, err := h.opts.DNSHandler.ServeDNS(req.Context(), m, meta)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		h.warnErr(req, fmt.Errorf("dns handler error: %s", err))
+		h.warnErr(req, fmt.Errorf("dns handler error: %w", err))
 		return
 	}
 
-	b, buf, err := pool.PackBuffer(r)
+	// Use pool to pack response, reducing GC pressure
+	resBytes, buf, err := pool.PackBuffer(r)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		h.warnErr(req, fmt.Errorf("pack response failed: %s", err))
+		h.warnErr(req, fmt.Errorf("pack response failed: %w", err))
 		return
 	}
 	defer buf.Release()
 
+	// 6. Finalize Response
 	w.Header().Set("Content-Type", "application/dns-message")
 	w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", dnsutils.GetMinimalTTL(r)))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(b)
+	_, _ = w.Write(resBytes)
 }
 
 func getRemoteAddr(req Request, customHeader string) (netip.Addr, error) {
-	if tcip := req.Header().Get("True-Client-IP"); tcip != "" {
-		if addr, err := netip.ParseAddr(tcip); err == nil {
-			req.SetRemoteAddr(tcip)
-			return addr, nil
-		}
-	}
-	if xrip := req.Header().Get("X-Real-IP"); xrip != "" {
-		if addr, err := netip.ParseAddr(xrip); err == nil {
-			req.SetRemoteAddr(xrip)
-			return addr, nil
-		}
-	}
-	if xff := req.Header().Get("X-Forwarded-For"); xff != "" {
-		ip, _, _ := strings.Cut(xff, ",")
-		if addr, err := netip.ParseAddr(ip); err == nil {
-			req.SetRemoteAddr(ip)
-			return addr, nil
-		}
-	}
-	if customHeader != "" && !contain([]string{"True-Client-IP", "X-Real-IP", "X-Forwarded-For"}, customHeader) {
-		if ip := req.Header().Get(customHeader); ip != "" {
-			if addr, err := netip.ParseAddr(ip); err == nil {
-				req.SetRemoteAddr(ip)
+	// Priority check for common proxy headers
+	headers := []string{"True-Client-IP", "X-Real-IP", "X-Forwarded-For"}
+	for _, h := range headers {
+		if val := req.Header().Get(h); val != "" {
+			// Handle potential list in X-Forwarded-For (take first)
+			ipStr := val
+			if h == "X-Forwarded-For" {
+				ipStr, _, _ = strings.Cut(val, ",")
+			}
+			ipStr = strings.TrimSpace(ipStr)
+			if addr, err := netip.ParseAddr(ipStr); err == nil {
+				req.SetRemoteAddr(ipStr)
 				return addr, nil
 			}
 		}
 	}
+
+	// Check custom header if provided and not already checked
+	if customHeader != "" {
+		isStandard := false
+		for _, h := range headers {
+			if strings.EqualFold(customHeader, h) {
+				isStandard = true
+				break
+			}
+		}
+		if !isStandard {
+			if val := req.Header().Get(customHeader); val != "" {
+				if addr, err := netip.ParseAddr(val); err == nil {
+					req.SetRemoteAddr(val)
+					return addr, nil
+				}
+			}
+		}
+	}
+
+	// Fallback to direct remote address
 	addrport, err := netip.ParseAddrPort(req.GetRemoteAddr())
 	if err != nil {
 		return netip.Addr{}, err
 	}
 	return addrport.Addr(), nil
-}
-
-func contain[T any](arr []T, it T) bool {
-	for _, item := range arr {
-		if reflect.DeepEqual(it, item) {
-			return true
-		}
-	}
-	return false
 }
