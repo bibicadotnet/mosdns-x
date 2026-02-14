@@ -48,21 +48,21 @@ func init() {
 
 const (
 	defaultLazyUpdateTimeout = time.Second * 5
-	defaultEmptyAnswerTTL    = time.Second * 300
+	defaultEmptyAnswerTTL    = time.Second * 300
 )
 
 var _ coremain.ExecutablePlugin = (*cachePlugin)(nil)
 
 type Args struct {
-	Size              int    `yaml:"size"`
-	Redis             string `yaml:"redis"`
-	RedisTimeout      int    `yaml:"redis_timeout"`
-	LazyCacheTTL      int    `yaml:"lazy_cache_ttl"`
-	LazyCacheReplyTTL int    `yaml:"lazy_cache_reply_ttl"`
-	CacheEverything   bool   `yaml:"cache_everything"`
-	CompressResp      bool   `yaml:"compress_resp"`
-	WhenHit           string `yaml:"when_hit"`
-	CleanerInterval   *int   `yaml:"cleaner_interval"`
+	Size              int    `yaml:"size"`
+	Redis             string `yaml:"redis"`
+	RedisTimeout      int    `yaml:"redis_timeout"`
+	LazyCacheTTL      int    `yaml:"lazy_cache_ttl"`
+	LazyCacheReplyTTL int    `yaml:"lazy_cache_reply_ttl"`
+	CacheEverything   bool   `yaml:"cache_everything"`
+	CompressResp      bool   `yaml:"compress_resp"`
+	WhenHit           string `yaml:"when_hit"`
+	CleanerInterval   *int   `yaml:"cleaner_interval"`
 }
 
 type cachePlugin struct {
@@ -70,18 +70,18 @@ type cachePlugin struct {
 	args *Args
 
 	// Các trường được tính toán trước để tối ưu hiệu suất hot-path
-	lazyEnabled  bool
-	lazyWindow   time.Duration
+	lazyEnabled  bool
+	lazyWindow   time.Duration
 	lazyReplyTTL uint32
 
-	whenHit      executable_seq.Executable
-	backend      cache.Backend
+	whenHit      executable_seq.Executable
+	backend      cache.Backend
 	lazyUpdateSF singleflight.Group
 
-	queryTotal   prometheus.Counter
-	hitTotal     prometheus.Counter
+	queryTotal   prometheus.Counter
+	hitTotal     prometheus.Counter
 	lazyHitTotal prometheus.Counter
-	size         prometheus.GaugeFunc
+	size         prometheus.GaugeFunc
 }
 
 func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
@@ -105,10 +105,10 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 		opt.MaxRetries = -1
 		r := redis.NewClient(opt)
 		rcOpts := redis_cache.RedisCacheOpts{
-			Client:        r,
-			ClientCloser:  r,
+			Client:        r,
+			ClientCloser:  r,
 			ClientTimeout: time.Duration(args.RedisTimeout) * time.Millisecond,
-			Logger:        bp.L(),
+			Logger:        bp.L(),
 		}
 		rc, err := redis_cache.NewRedisCache(rcOpts)
 		if err != nil {
@@ -137,13 +137,13 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 	}
 
 	p_inst := &cachePlugin{
-		BP:      bp,
-		args:    args,
+		BP:      bp,
+		args:    args,
 		backend: c,
 		whenHit: whenHit,
 
-		lazyEnabled:  args.LazyCacheTTL > 0,
-		lazyWindow:   time.Duration(args.LazyCacheTTL) * time.Second,
+		lazyEnabled:  args.LazyCacheTTL > 0,
+		lazyWindow:   time.Duration(args.LazyCacheTTL) * time.Second,
 		lazyReplyTTL: uint32(args.LazyCacheReplyTTL),
 
 		queryTotal: prometheus.NewCounter(prometheus.CounterOpts{
@@ -221,7 +221,7 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 	c.L().Debug("cache miss", qCtx.InfoField(), zap.String("tag", c.Tag()))
 	err = executable_seq.ExecChainNode(ctx, qCtx, next)
 
-	// 3. STORE PATH: 
+	// 3. STORE PATH: 
 	// Sử dụng logic Response Generation: Chỉ store nếu generation của response hiện tại chưa được cache.
 	// Điều này cho phép Phase 5 store response mới ngay cả khi Phase 4 đã store response cũ.
 	r := qCtx.R()
