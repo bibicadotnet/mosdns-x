@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
 
 jobs:
+
   build-release:
     runs-on: ubuntu-24.04
     steps:
       - name: get latest go version
         id: go
         run: |
-          # 2026 dùng bản stable mới nhất cho tối ưu
           echo version=1.25.5 >> $GITHUB_OUTPUT
 
       - name: Set up Go
@@ -27,16 +27,6 @@ jobs:
         uses: actions/setup-python@v2
         with:
           python-version: '3.8'
-
-      - name: Prepare PGO Profile
-        run: |
-          # Convert file profile ngay tại chỗ để compiler không bị lỗi wire type
-          if [ -f "cpu.pprof" ]; then
-            go tool pprof -proto cpu.pprof > default.pgo
-          else
-            echo "Error: cpu.pprof not found in root directory"
-            exit 1
-          fi
 
       - name: Build
         run: |
