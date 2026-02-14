@@ -73,8 +73,10 @@ type Context struct {
 	id            uint32
 	reqMeta       *RequestMeta
 
-	r     *dns.Msg
-	marks map[uint]struct{}
+	r           *dns.Msg
+	responseGen uint64 // Tăng tiến mỗi khi có response mới (từ cache hoặc upstream)
+	cachedGen   uint64 // Lưu version của response đã được ghi vào cache thành công
+	marks       map[uint]struct{}
 }
 
 var (
@@ -102,7 +104,6 @@ func NewContext(q *dns.Msg, meta *RequestMeta) *Context {
 }
 
 // String returns a short summary of its query.
-// Optimized: Trust the gatekeeper (_misc_optm). len(q.Question) is guaranteed to be 1.
 func (ctx *Context) String() string {
 	q := ctx.q.Question[0]
 	return fmt.Sprintf("%s %s %s %d %d",
@@ -120,7 +121,6 @@ func (ctx *Context) Q() *dns.Msg {
 }
 
 // OriginalQuery returns the copied original query msg.
-// Optimized: q.Copy() only happens when this is called (Lazy Init).
 func (ctx *Context) OriginalQuery() *dns.Msg {
 	if ctx.originalQuery == nil {
 		ctx.originalQuery = ctx.q.Copy()
@@ -138,9 +138,25 @@ func (ctx *Context) R() *dns.Msg {
 	return ctx.r
 }
 
-// SetResponse stores the response r to the context.
+// SetResponse stores the response r to the context and increments generation.
 func (ctx *Context) SetResponse(r *dns.Msg) {
 	ctx.r = r
+	ctx.responseGen++ // Đánh dấu một "thế hệ" response mới
+}
+
+// ResponseGen returns the current response generation.
+func (ctx *Context) ResponseGen() uint64 {
+	return ctx.responseGen
+}
+
+// MarkAsCached records that the current response generation has been cached.
+func (ctx *Context) MarkAsCached() {
+	ctx.cachedGen = ctx.responseGen
+}
+
+// IsAlreadyCached reports whether the current response generation is already cached.
+func (ctx *Context) IsAlreadyCached() bool {
+	return ctx.r != nil && ctx.cachedGen == ctx.responseGen
 }
 
 // Id returns the Context id.
@@ -173,6 +189,10 @@ func (ctx *Context) ShallowCopyForBackground() *Context {
 		originalQuery: ctx.originalQuery,
 		reqMeta:       ctx.reqMeta,
 		id:            ctx.id,
+		// Gen fields are typically not needed for background lazy updates 
+		// as they start their own internal pipeline, but we keep them for consistency.
+		responseGen:   ctx.responseGen,
+		cachedGen:     ctx.cachedGen,
 	}
 }
 
@@ -183,6 +203,8 @@ func (ctx *Context) CopyTo(d *Context) *Context {
 	d.originalQuery = ctx.originalQuery
 	d.reqMeta = ctx.reqMeta
 	d.id = ctx.id
+	d.responseGen = ctx.responseGen
+	d.cachedGen = ctx.cachedGen
 
 	if r := ctx.r; r != nil {
 		d.r = r.Copy()
