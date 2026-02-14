@@ -26,6 +26,18 @@ const (
 	PluginType = "cache"
 )
 
+// Context helpers for lazy update flow control.
+type lazyBypassKey struct{}
+
+func setLazyBypass(ctx context.Context) context.Context {
+	return context.WithValue(ctx, lazyBypassKey{}, true)
+}
+
+func isLazyBypass(ctx context.Context) bool {
+	v, _ := ctx.Value(lazyBypassKey{}).(bool)
+	return v
+}
+
 func init() {
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(Args) })
 
@@ -61,6 +73,7 @@ type cachePlugin struct {
 	lazyEnabled  bool
 	lazyWindow   time.Duration
 	lazyReplyTTL uint32
+	storedMark   uint
 
 	whenHit      executable_seq.Executable
 	backend      cache.Backend
@@ -82,6 +95,11 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 	}
 	if args.LazyCacheReplyTTL <= 0 {
 		args.LazyCacheReplyTTL = 5
+	}
+
+	markId, err := query_context.AllocateMark()
+	if err != nil {
+		return nil, fmt.Errorf("failed to allocate mark: %w", err)
 	}
 
 	var c cache.Backend
@@ -124,7 +142,7 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 		}
 	}
 
-	p := &cachePlugin{
+	p_inst := &cachePlugin{
 		BP:      bp,
 		args:    args,
 		backend: c,
@@ -133,6 +151,7 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 		lazyEnabled:  args.LazyCacheTTL > 0,
 		lazyWindow:   time.Duration(args.LazyCacheTTL) * time.Second,
 		lazyReplyTTL: uint32(args.LazyCacheReplyTTL),
+		storedMark:   markId,
 
 		queryTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "query_total",
@@ -153,8 +172,8 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 			return float64(c.Len())
 		}),
 	}
-	bp.GetMetricsReg().MustRegister(p.queryTotal, p.hitTotal, p.lazyHitTotal, p.size)
-	return p, nil
+	bp.GetMetricsReg().MustRegister(p_inst.queryTotal, p_inst.hitTotal, p_inst.lazyHitTotal, p_inst.size)
+	return p_inst, nil
 }
 
 func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
@@ -169,32 +188,54 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 		return executable_seq.ExecChainNode(ctx, qCtx, next)
 	}
 
-	cachedResp, lazyHit, err := c.lookupCache(msgKey)
-	if err != nil {
-		c.L().Error("lookup cache", qCtx.InfoField(), zap.Error(err))
+	// 1. LOOKUP PATH: Skip lookup if lazy bypass is active (background update flow)
+	if !isLazyBypass(ctx) {
+		cachedResp, lazyHit, err := c.lookupCache(msgKey)
+		if err != nil {
+			c.L().Error("lookup cache", qCtx.InfoField(), zap.Error(err))
+		}
+
+		if cachedResp != nil {
+		    if lazyHit {
+		        c.lazyHitTotal.Inc()
+		        c.doLazyUpdate(msgKey, qCtx, next)
+		    }
+
+		    c.hitTotal.Inc()
+		    cachedResp.Id = q.Id
+
+		    // Cải tiến logic log để test chính xác
+		    hitFrom := "phase0"
+		    // Nếu trong qCtx đã có mark hoặc đã đi qua một rewriter nào đó, 
+		    // ta có thể ngầm hiểu nó không còn ở đầu pipeline nữa.
+		    c.L().Warn(
+		        "cache hit",
+		        qCtx.InfoField(),
+		        zap.String("cache_tag", c.Tag()),
+		        zap.String("hit_from", hitFrom), 
+		        zap.Bool("lazy", lazyHit),
+		    )
+
+		    qCtx.SetResponse(cachedResp)
+		    if c.whenHit != nil {
+		        return c.whenHit.Exec(ctx, qCtx, nil)
+		    }
+		    return nil
+		}
 	}
 
-	if cachedResp != nil {
-		if lazyHit {
-			c.lazyHitTotal.Inc()
-			c.doLazyUpdate(msgKey, qCtx, next)
-		}
-		c.hitTotal.Inc()
-		cachedResp.Id = q.Id
-		c.L().Debug("cache hit", qCtx.InfoField())
-		qCtx.SetResponse(cachedResp)
-		if c.whenHit != nil {
-			return c.whenHit.Exec(ctx, qCtx, nil)
-		}
-		return nil
-	}
-
+	// 2. MISS/BYPASS PATH: Execute downstream pipeline.
 	c.L().Debug("cache miss", qCtx.InfoField())
 	err = executable_seq.ExecChainNode(ctx, qCtx, next)
+
+	// 3. STORE PATH: Only store if not already stored by a peer instance of this plugin tag.
 	r := qCtx.R()
 	if r != nil {
-		if err := c.tryStoreMsg(msgKey, r); err != nil {
-			c.L().Error("cache store", qCtx.InfoField(), zap.Error(err))
+		if !qCtx.HasMark(c.storedMark) {
+			if err := c.tryStoreMsg(msgKey, r); err != nil {
+				c.L().Error("cache store", qCtx.InfoField(), zap.Error(err))
+			}
+			qCtx.AddMark(c.storedMark)
 		}
 	}
 	return err
@@ -271,13 +312,17 @@ func (c *cachePlugin) doLazyUpdate(msgKey string, qCtx *query_context.Context, n
 		lazyCtx, cancel := context.WithTimeout(context.Background(), defaultLazyUpdateTimeout)
 		defer cancel()
 
+		// Always set bypass flag to skip redundant lookups in the background pipeline.
+		lazyCtx = setLazyBypass(lazyCtx)
+
 		err := executable_seq.ExecChainNode(lazyCtx, lazyQCtx, next)
 		if err != nil {
 			c.L().Warn("failed to update lazy cache", lazyQCtx.InfoField(), zap.Error(err))
 		}
 
+		// Self-healing: If downstream failed to store (due to branching), initiator stores it.
 		r := lazyQCtx.R()
-		if r != nil {
+		if r != nil && !lazyQCtx.HasMark(c.storedMark) {
 			if err := c.tryStoreMsg(msgKey, r); err != nil {
 				c.L().Error("cache store", lazyQCtx.InfoField(), zap.Error(err))
 			}
