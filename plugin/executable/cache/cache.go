@@ -26,7 +26,7 @@ const (
 	PluginType = "cache"
 )
 
-// Context helpers for lazy update flow control.
+// Context helpers cho luồng cập nhật lazy ngầm.
 type lazyBypassKey struct{}
 
 func setLazyBypass(ctx context.Context) context.Context {
@@ -69,11 +69,10 @@ type cachePlugin struct {
 	*coremain.BP
 	args *Args
 
-	// Pre-computed fields for hot path performance
+	// Các trường được tính toán trước để tối ưu hiệu suất hot-path
 	lazyEnabled  bool
 	lazyWindow   time.Duration
 	lazyReplyTTL uint32
-	storedMark   uint
 
 	whenHit      executable_seq.Executable
 	backend      cache.Backend
@@ -95,11 +94,6 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 	}
 	if args.LazyCacheReplyTTL <= 0 {
 		args.LazyCacheReplyTTL = 5
-	}
-
-	markId, err := query_context.AllocateMark()
-	if err != nil {
-		return nil, fmt.Errorf("failed to allocate mark: %w", err)
 	}
 
 	var c cache.Backend
@@ -142,7 +136,7 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 		}
 	}
 
-	p_inst := &cachePlugin{
+	p := &cachePlugin{
 		BP:      bp,
 		args:    args,
 		backend: c,
@@ -151,7 +145,6 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 		lazyEnabled:  args.LazyCacheTTL > 0,
 		lazyWindow:   time.Duration(args.LazyCacheTTL) * time.Second,
 		lazyReplyTTL: uint32(args.LazyCacheReplyTTL),
-		storedMark:   markId,
 
 		queryTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "query_total",
@@ -188,7 +181,7 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 		return executable_seq.ExecChainNode(ctx, qCtx, next)
 	}
 
-	// 1. LOOKUP PATH: Skip lookup if lazy bypass is active (background update flow)
+	// 1. LOOKUP PATH: Bỏ qua lookup nếu đang trong luồng update ngầm (lazy bypass)
 	if !isLazyBypass(ctx) {
 		cachedResp, lazyHit, err := c.lookupCache(msgKey)
 		if err != nil {
@@ -196,62 +189,59 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 		}
 
 		if cachedResp != nil {
-		    if lazyHit {
-		        c.lazyHitTotal.Inc()
-		        c.doLazyUpdate(msgKey, qCtx, next)
-		    }
+			if lazyHit {
+				c.lazyHitTotal.Inc()
+				c.doLazyUpdate(msgKey, qCtx, next)
+			}
 
-		    c.hitTotal.Inc()
-		    cachedResp.Id = q.Id
+			c.hitTotal.Inc()
+			cachedResp.Id = q.Id
 
-		    // Cải tiến logic log để test chính xác
-		    hitFrom := "phase0"
-		    // Nếu trong qCtx đã có mark hoặc đã đi qua một rewriter nào đó, 
-		    // ta có thể ngầm hiểu nó không còn ở đầu pipeline nữa.
-		    c.L().Warn(
-		        "cache hit",
-		        qCtx.InfoField(),
-		        zap.String("cache_tag", c.Tag()),
-		        zap.String("hit_from", hitFrom), 
-		        zap.Bool("lazy", lazyHit),
-		    )
+			// Log Warn để xác nhận HIT từ Phase 0
+			c.L().Warn(
+				"cache hit",
+				qCtx.InfoField(),
+				zap.String("cache_tag", c.Tag()),
+				zap.String("hit_from", "phase0"),
+				zap.Bool("lazy", lazyHit),
+			)
 
-		    qCtx.SetResponse(cachedResp)
-		    if c.whenHit != nil {
-		        return c.whenHit.Exec(ctx, qCtx, nil)
-		    }
-		    return nil
+			qCtx.SetResponse(cachedResp)
+			// Quan trọng: Đánh dấu generation hiện tại đã được cache để tránh store đè ở phase sau
+			qCtx.MarkAsCached()
+
+			if c.whenHit != nil {
+				return c.whenHit.Exec(ctx, qCtx, nil)
+			}
+			return nil
 		}
 	}
 
-	// 2. MISS/BYPASS PATH: Execute downstream pipeline.
-	c.L().Debug("cache miss", qCtx.InfoField())
+	// 2. MISS/BYPASS PATH: Thực thi các phase tiếp theo trong pipeline
+	c.L().Debug("cache miss", qCtx.InfoField(), zap.String("tag", c.Tag()))
 	err = executable_seq.ExecChainNode(ctx, qCtx, next)
 
-	// 3. STORE PATH: Only store if not already stored by a peer instance of this plugin tag.
+	// 3. STORE PATH: 
+	// Sử dụng logic Response Generation: Chỉ store nếu generation của response hiện tại chưa được cache.
+	// Điều này cho phép Phase 5 store response mới ngay cả khi Phase 4 đã store response cũ.
 	r := qCtx.R()
 	if r != nil {
-		if !qCtx.HasMark(c.storedMark) {
+		if !qCtx.IsAlreadyCached() {
 			if err := c.tryStoreMsg(msgKey, r); err != nil {
 				c.L().Error("cache store", qCtx.InfoField(), zap.Error(err))
+			} else {
+				qCtx.MarkAsCached()
+				c.L().Debug("stored", qCtx.InfoField(), zap.String("tag", c.Tag()), zap.Uint64("gen", qCtx.ResponseGen()))
 			}
-			qCtx.AddMark(c.storedMark)
+		} else {
+			c.L().Debug("skipped", qCtx.InfoField(), zap.String("tag", c.Tag()), zap.Uint64("gen", qCtx.ResponseGen()))
 		}
 	}
 	return err
 }
 
 func (c *cachePlugin) getMsgKey(q *dns.Msg) (string, error) {
-	// Only cache standard DNS queries with exactly one question.
-	// Multi-question or malformed queries are intentionally ignored.
-	// Cache behavior is controlled by the upstream pipeline, not by branching here:
-	// - To behave like cache_everything = false:
-	//   place '_edns0_filter_no_edns0' before the cache plugin.
-	// - To behave like cache_everything = true (cache by ECS):
-	//   place the 'ecs' plugin (with normalized subnets) before the cache plugin.
-	//
-	// At this stage, the DNS message is already normalized and safe to serialize
-	// directly as a binary cache key.
+	// Trạng thái chuẩn hóa của Key phụ thuộc vào các plugin đặt trước cache (như ecs_handler hoặc edns0_filter)
 	return dnsutils.GetMsgKey(q, 0)
 }
 
@@ -283,12 +273,9 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 	}
 
 	now := time.Now()
-	// Logic to divide cache status into 3 zones: Fresh, Stale (Lazy), and Expired.
 	dnsExpireAt := backendExpireAt.Add(-c.lazyWindow)
 
 	if now.Before(dnsExpireAt) {
-		// Zone 1: Fresh.
-		// Use Unix timestamps for fast integer subtraction and clock-skew handling.
 		if elapsed := now.Unix() - storedTime.Unix(); elapsed > 0 {
 			dnsutils.SubtractTTL(r, uint32(elapsed))
 		}
@@ -296,7 +283,6 @@ func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err 
 	}
 
 	if c.lazyEnabled && now.Before(backendExpireAt) {
-		// Zone 2: Stale (Lazy hit).
 		dnsutils.SetTTL(r, c.lazyReplyTTL)
 		return r, true, nil
 	}
@@ -312,7 +298,6 @@ func (c *cachePlugin) doLazyUpdate(msgKey string, qCtx *query_context.Context, n
 		lazyCtx, cancel := context.WithTimeout(context.Background(), defaultLazyUpdateTimeout)
 		defer cancel()
 
-		// Always set bypass flag to skip redundant lookups in the background pipeline.
 		lazyCtx = setLazyBypass(lazyCtx)
 
 		err := executable_seq.ExecChainNode(lazyCtx, lazyQCtx, next)
@@ -320,11 +305,13 @@ func (c *cachePlugin) doLazyUpdate(msgKey string, qCtx *query_context.Context, n
 			c.L().Warn("failed to update lazy cache", lazyQCtx.InfoField(), zap.Error(err))
 		}
 
-		// Self-healing: If downstream failed to store (due to branching), initiator stores it.
+		// Self-healing trong luồng ngầm cũng sử dụng logic IsAlreadyCached
 		r := lazyQCtx.R()
-		if r != nil && !lazyQCtx.HasMark(c.storedMark) {
+		if r != nil && !lazyQCtx.IsAlreadyCached() {
 			if err := c.tryStoreMsg(msgKey, r); err != nil {
 				c.L().Error("cache store", lazyQCtx.InfoField(), zap.Error(err))
+			} else {
+				lazyQCtx.MarkAsCached()
 			}
 		}
 		c.L().Debug("lazy cache updated", lazyQCtx.InfoField())
@@ -355,7 +342,6 @@ func (c *cachePlugin) tryStoreMsg(key string, r *dns.Msg) error {
 		return nil
 	}
 
-	// Backend expiration = DNS TTL + Pre-computed Lazy Window.
 	expirationTime := now.Add(msgTTL + c.lazyWindow)
 
 	if c.args.CompressResp {
