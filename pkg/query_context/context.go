@@ -182,6 +182,7 @@ func (ctx *Context) Copy() *Context {
 }
 
 // ShallowCopyForBackground creates a lightweight copy of this Context.
+// ShallowCopyForBackground creates a lightweight copy of this Context for lazy updates.
 func (ctx *Context) ShallowCopyForBackground() *Context {
 	return &Context{
 		startTime:     ctx.startTime,
@@ -189,10 +190,8 @@ func (ctx *Context) ShallowCopyForBackground() *Context {
 		originalQuery: ctx.originalQuery,
 		reqMeta:       ctx.reqMeta,
 		id:            ctx.id,
-		// Gen fields are typically not needed for background lazy updates 
-		// as they start their own internal pipeline, but we keep them for consistency.
-		responseGen:   ctx.responseGen,
-		cachedGen:     ctx.cachedGen,
+		// responseGen và cachedGen mặc định về 0.
+		// Luồng lazy sẽ tự quản lý versioning của riêng nó.
 	}
 }
 
