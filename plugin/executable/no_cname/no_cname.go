@@ -80,7 +80,6 @@ func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next ex
 	// Truncate Answer in-place. Wipe Authority (Ns) and Extra (EDNS0) sections.
 	// At this stage, only pure IP records are required for the client.
 	r.Answer = ans[:writeIdx]
-	r.Ns = nil
 	r.Extra = nil
 
 	return nil
