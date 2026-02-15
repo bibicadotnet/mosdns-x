@@ -34,12 +34,12 @@ func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
 		ch:       make(chan string, 4096), // Buffer to absorb traffic bursts
 	}
 
-	// Initial Load: Normalize existing file data (one-time cost)
+	// Initial Load: Normalize existing file data (one-time boot cost)
 	f, err := os.Open(c.fileName)
 	if err == nil {
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
-			// Thorough cleaning for file data to ensure consistency
+			// Thorough cleaning for file data to ensure consistency across reloads
 			d := strings.ToLower(strings.Trim(scanner.Text(), ". \t\n\r"))
 			if d != "" {
 				c.seen.Store(d, struct{}{})
@@ -84,9 +84,9 @@ func (c *Collector) Exec(ctx context.Context, qCtx *query_context.Context, next 
 	// Relying on Gatekeeper (misc_optm) for structure validation and lowercasing.
 	raw := qCtx.Q().Question[0].Name
 
-	// ZERO-ALLOCATION PATH:
-	// TrimSuffix returns the original string if the suffix is missing.
-	// Since misc_optm already lowercased the domain, this is effectively free.
+	// MINIMAL-ALLOCATION PATH:
+	// TrimSuffix is significantly cheaper than ToLower as it only slices the string.
+	// Since misc_optm already lowercased the domain, we avoid redundant heap allocations.
 	cleaned := strings.TrimSuffix(raw, ".")
 
 	// ATOMIC LOOKUP:
