@@ -29,61 +29,61 @@ type noCNAME struct {
 	*coremain.BP
 }
 
-// Exec strips CNAME records and flattens responses for A/AAAA queries.
-// Optimized for maximum performance: zero-allocation, in-place mutation.
+// Exec strips CNAME records and flattens responses.
+//
+// ⚠️ PIPELINE POSITION:
+// This plugin MUST be placed at the BOTTOM of your 'exec' sequence
+// (immediately before '- _return') to process responses first.
+//
+// Example YAML:
+//   - ... (other plugins)
+//   - _no_cname    <-- Place at the BOTTOM
+//   - _return
 func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
+	// 1. Upstream execution first (wait for response).
 	if err := executable_seq.ExecChainNode(ctx, qCtx, next); err != nil {
 		return err
 	}
 
 	r := qCtx.R()
-	// Early exit: if response is nil or Answer is empty, no flattening required.
+	// Early exit: If response is nil or Answer is empty, no modification is needed.
 	if r == nil || len(r.Answer) == 0 {
 		return nil
 	}
 
-	// Hot-path optimization: Only process A/AAAA queries.
-	// Other types like HTTPS (65) or SRV (33) are returned as-is to prevent semantic breakage.
-	q := r.Question[0]
-	if q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA {
-		return nil
-	}
-
 	ans := r.Answer
-	qName := q.Name
+	qName := r.Question[0].Name
 	writeIdx := 0
-	hasIP := false
 
-	// --- SINGLE PASS IN-PLACE FLATTENING ---
-	// Iterate once to filter and rewrite names simultaneously.
-	// Avoids dns.Copy() by mutating the RR Header Name pointer directly (Zero-allocation).
+	// 2. UNIVERSAL IN-PLACE FLATTENING:
+	// Instead of explicit QType checks (A/AAAA), we use writeIdx as a content-based filter.
+	// - For IP queries: writeIdx increments, flattening occurs.
+	// - For non-IP queries (SRV, MX, TXT): writeIdx remains 0, returning original response.
+	// This single-pass approach is zero-allocation and handles all edge cases safely.
 	for i := 0; i < len(ans); i++ {
 		rr := ans[i]
 		rt := rr.Header().Rrtype
 
 		if rt == dns.TypeA || rt == dns.TypeAAAA {
-			hasIP = true
-			
-			// In-place name rewrite. Pointer assignment is extremely cheap.
+			// Pointer swap: rewrite name to match original question.
 			rr.Header().Name = qName
-			
 			ans[writeIdx] = rr
 			writeIdx++
 		}
 	}
 
-	// If no IP records found (e.g., CNAME pointing to non-IP types),
-	// return original response to maintain client-side logic.
-	if !hasIP {
+	// 3. SAFE EXIT:
+	// If no IP records were found, return the original response as-is.
+	// This ensures we don't break non-IP queries or IP queries with no glue records.
+	if writeIdx == 0 {
 		return nil
 	}
 
-	// Truncate Answer slice in-place to avoid new slice allocation.
+	// 4. FINAL CLEANUP:
+	// Truncate Answer in-place. Wipe Authority (Ns) and Extra (EDNS0) sections.
+	// At this stage, only pure IP records are required for the client.
 	r.Answer = ans[:writeIdx]
-
-	// --- ULTRA FAST EXTRA CLEANUP ---
-	// Since this plugin resides at the end of the pipeline, OPT (EDNS0) is no longer needed.
-	// Assigning nil is a 0ns operation to wipe the Extra section.
+	r.Ns = nil
 	r.Extra = nil
 
 	return nil
