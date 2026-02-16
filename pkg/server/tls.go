@@ -162,7 +162,9 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 					timer.Stop()
 					return
 				}
-				
+
+				log.Printf("[INFO] Certificate event: %s %v", e.Name, e.Op)
+
 				if e.Has(fsnotify.Remove) || e.Has(fsnotify.Rename) {
 					log.Printf("[INFO] Certificate file %s was removed/renamed, re-watching original paths", e.Name)
 					needReWatch = true
@@ -190,6 +192,7 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 				timer.Reset(2 * time.Second)
 				
 			case <-timer.C:
+				log.Printf("[INFO] Certificate reload timer fired")
 				if needReWatch {
 					needReWatch = false
 					_ = watcher.Remove(certFile)
