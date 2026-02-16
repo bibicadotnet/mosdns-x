@@ -106,7 +106,7 @@ func (e *hasValidAnswer) match(qCtx *query_context.Context) bool {
 	for _, rr := range r.Answer {
 		h := rr.Header()
 		// Case-insensitive comparison without allocation for upstream response validation.
-		if h.Rrtype == target.Qtype && strings.EqualFold(h.Name, target.Name) {
+		if h.Rrtype == target.Qtype && h.Name == target.Name {
 			return true
 		}
 	}
