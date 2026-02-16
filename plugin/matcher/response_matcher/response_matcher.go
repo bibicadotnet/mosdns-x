@@ -92,33 +92,10 @@ type hasValidAnswer struct {
 
 var _ coremain.MatcherPlugin = (*hasValidAnswer)(nil)
 
-// equalDNSName performs an ASCII case-insensitive comparison.
-// This is faster than strings.EqualFold as it avoids Unicode overhead.
-func equalDNSName(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		ca, cb := a[i], b[i]
-		if ca == cb {
-			continue
-		}
-		if ca >= 'A' && ca <= 'Z' {
-			ca += 32
-		}
-		if cb >= 'A' && cb <= 'Z' {
-			cb += 32
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
-}
-
 func (e *hasValidAnswer) match(qCtx *query_context.Context) bool {
 	r := qCtx.R()
-	if r == nil {
+	// Skip fast if response is nil or has no answers.
+	if r == nil || len(r.Answer) == 0 {
 		return false
 	}
 
@@ -127,8 +104,8 @@ func (e *hasValidAnswer) match(qCtx *query_context.Context) bool {
 
 	for _, rr := range r.Answer {
 		h := rr.Header()
-		// Only Type and Name are checked. Class is enforced as INET at Server Layer.
-		if h.Rrtype == target.Qtype && equalDNSName(h.Name, target.Name) {
+		// Using exported domain.EqualDNSName to handle case-insensitivity without redundant local code.
+		if h.Rrtype == target.Qtype && domain.EqualDNSName(h.Name, target.Name) {
 			return true
 		}
 	}
