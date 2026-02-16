@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package concurrent_lru
 
 import (
@@ -29,15 +10,22 @@ import (
 type ShardedLRU[V any] struct {
 	seed maphash.Seed
 	l    []*ConcurrentLRU[string, V]
+	mask uint64 // shardNum - 1 (shardNum must be power of 2)
 }
 
 func NewShardedLRU[V any](
 	shardNum, maxSizePerShard int,
 	onEvict func(key string, v V),
 ) *ShardedLRU[V] {
+
+	if shardNum <= 0 || shardNum&(shardNum-1) != 0 {
+		panic("shardNum must be a power of 2 and > 0")
+	}
+
 	cl := &ShardedLRU[V]{
 		seed: maphash.MakeSeed(),
 		l:    make([]*ConcurrentLRU[string, V], shardNum),
+		mask: uint64(shardNum - 1),
 	}
 
 	for i := range cl.l {
@@ -49,26 +37,27 @@ func NewShardedLRU[V any](
 	return cl
 }
 
+func (c *ShardedLRU[V]) getShard(key string) *ConcurrentLRU[string, V] {
+	h := maphash.String(c.seed, key)
+	return c.l[int(h&c.mask)]
+}
+
 func (c *ShardedLRU[V]) Add(key string, v V) {
-	sl := c.getShard(key)
-	sl.Add(key, v)
+	c.getShard(key).Add(key, v)
 }
 
 func (c *ShardedLRU[V]) Del(key string) {
-	sl := c.getShard(key)
-	sl.Del(key)
-}
-
-func (c *ShardedLRU[V]) Clean(f func(key string, v V) (remove bool)) (removed int) {
-	for i := range c.l {
-		removed += c.l[i].Clean(f)
-	}
-	return removed
+	c.getShard(key).Del(key)
 }
 
 func (c *ShardedLRU[V]) Get(key string) (v V, ok bool) {
-	sl := c.getShard(key)
-	v, ok = sl.Get(key)
+	return c.getShard(key).Get(key)
+}
+
+func (c *ShardedLRU[V]) Clean(f func(key string, v V) bool) (removed int) {
+	for _, shard := range c.l {
+		removed += shard.Clean(f)
+	}
 	return
 }
 
@@ -80,27 +69,17 @@ func (c *ShardedLRU[V]) Len() int {
 	return sum
 }
 
-func (c *ShardedLRU[V]) shardNum() int {
-	return len(c.l)
-}
+// -----------------------------
 
-func (c *ShardedLRU[V]) getShard(key string) *ConcurrentLRU[string, V] {
-	h := maphash.Hash{}
-	h.SetSeed(c.seed)
-
-	h.WriteString(key)
-	n := h.Sum64() % uint64(c.shardNum())
-	return c.l[n]
-}
-
-// ConcurrentLRU is a lru.LRU with a lock.
-// It is concurrent safe.
 type ConcurrentLRU[K comparable, V any] struct {
 	sync.Mutex
 	lru *lru.LRU[K, V]
 }
 
-func NewConecurrentLRU[K comparable, V any](maxSize int, onEvict func(key K, v V)) *ConcurrentLRU[K, V] {
+func NewConcurrentLRU[K comparable, V any](
+	maxSize int,
+	onEvict func(key K, v V),
+) *ConcurrentLRU[K, V] {
 	return &ConcurrentLRU[K, V]{
 		lru: lru.NewLRU[K, V](maxSize, onEvict),
 	}
@@ -108,36 +87,33 @@ func NewConecurrentLRU[K comparable, V any](maxSize int, onEvict func(key K, v V
 
 func (c *ConcurrentLRU[K, V]) Add(key K, v V) {
 	c.Lock()
-	defer c.Unlock()
-
 	c.lru.Add(key, v)
+	c.Unlock()
 }
 
 func (c *ConcurrentLRU[K, V]) Del(key K) {
 	c.Lock()
-	defer c.Unlock()
-
 	c.lru.Del(key)
-}
-
-func (c *ConcurrentLRU[K, V]) Clean(f func(key K, v V) (remove bool)) (removed int) {
-	c.Lock()
-	defer c.Unlock()
-
-	return c.lru.Clean(f)
+	c.Unlock()
 }
 
 func (c *ConcurrentLRU[K, V]) Get(key K) (v V, ok bool) {
 	c.Lock()
-	defer c.Unlock()
-
 	v, ok = c.lru.Get(key)
+	c.Unlock()
+	return
+}
+
+func (c *ConcurrentLRU[K, V]) Clean(f func(key K, v V) bool) (removed int) {
+	c.Lock()
+	removed = c.lru.Clean(f)
+	c.Unlock()
 	return
 }
 
 func (c *ConcurrentLRU[K, V]) Len() int {
 	c.Lock()
-	defer c.Unlock()
-
-	return c.lru.Len()
+	n := c.lru.Len()
+	c.Unlock()
+	return n
 }
