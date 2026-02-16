@@ -49,7 +49,7 @@ func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
 
 // Exec limits the number of IP records in the DNS answer.
 //
-// ⚠️ YAML CONFIGURATION WARNING:
+// YAML CONFIGURATION WARNING:
 // In Mosdns, the response processing order is the REVERSE of the YAML order.
 //
 // To ensure logic correctness, place this ABOVE '_no_cname' in your YAML:
