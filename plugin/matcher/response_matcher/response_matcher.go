@@ -3,7 +3,6 @@ package responsematcher
 import (
 	"context"
 	"io"
-	"strings"
 
 	"go.uber.org/zap"
 
