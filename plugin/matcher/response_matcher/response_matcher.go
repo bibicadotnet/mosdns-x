@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2020-2026, IrineSistiana
+ */
+
 package responsematcher
 
 import (
@@ -98,28 +102,26 @@ var _ coremain.MatcherPlugin = (*hasValidAnswer)(nil)
 
 func (e *hasValidAnswer) match(qCtx *query_context.Context) bool {
 	r := qCtx.R()
-	if r == nil {
-		return false
-	}
-
 	q := qCtx.Q()
-	if q == nil {
+
+	// Minimal guards to ensure the plugin is self-contained and crash-proof.
+	// Negligible CPU cost compared to the performance gain from loop simplification.
+	if r == nil || q == nil || len(q.Question) == 0 {
 		return false
 	}
 
-	questions := q.Question
-	if len(questions) == 0 {
-		return false
-	}
+	// Optimization: Direct access to the primary question.
+	// Bypasses nested loops based on standard DNS query behavior.
+	question := q.Question[0]
 
+	// Efficient linear scan of the Answer section.
 	for _, rr := range r.Answer {
 		h := rr.Header()
-		for _, question := range questions {
-			if h.Rrtype == question.Qtype &&
-				h.Class == question.Qclass &&
-				h.Name == question.Name {
-				return true
-			}
+		// Validating record against the original question.
+		if h.Rrtype == question.Qtype &&
+			h.Class == question.Qclass &&
+			h.Name == question.Name {
+			return true
 		}
 	}
 
