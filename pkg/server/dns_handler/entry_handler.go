@@ -9,6 +9,7 @@ package dns_handler
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,6 +133,10 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 	if !hasDot {
 		return h.responseNXDomain(req), nil
 	}
+
+    // Normalize domain to lowercase once at boundary.
+    // Downstream code (cache, matchers) can assume lowercase invariant.
+	req.Question[0].Name = strings.ToLower(name)
 
 	// 5. Final Hygiene Checks
 	if q.Qclass != dns.ClassINET {
