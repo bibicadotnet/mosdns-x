@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package transport
 
 import (
@@ -25,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -124,6 +106,8 @@ func NewTransport(opts Opts) (*Transport, error) {
 type Transport struct {
 	opts Opts
 
+	closedAtomic atomic.Bool // fast path for isClosed check
+
 	m                  sync.Mutex // protect following fields
 	closed             bool
 	pipelineConns      map[*dnsConn]*pipelineStatus
@@ -137,10 +121,7 @@ type pipelineStatus struct {
 }
 
 func (t *Transport) isClosed() bool {
-	t.m.Lock()
-	closed := t.closed
-	t.m.Unlock()
-	return closed
+	return t.closedAtomic.Load()
 }
 
 func (t *Transport) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
@@ -166,6 +147,8 @@ func (t *Transport) Close() error {
 	defer t.m.Unlock()
 
 	t.closed = true
+	t.closedAtomic.Store(true) // sync atomic flag
+
 	for conn := range t.pipelineConns {
 		delete(t.pipelineConns, conn)
 		conn.closeWithErr(errClosedTransport)
