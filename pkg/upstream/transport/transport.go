@@ -488,13 +488,15 @@ func (dc *dnsConn) dialAndRead() {
 }
 
 func (dc *dnsConn) readLoop() {
+	dc.c.SetReadDeadline(time.Now().Add(dc.t.opts.IdleTimeout))
 	for {
-		dc.c.SetReadDeadline(time.Now().Add(dc.t.opts.IdleTimeout))
 		r, _, err := dc.t.opts.ReadFunc(dc.c)
 		if err != nil {
 			dc.closeWithErr(err) // abort this connection.
 			return
 		}
+
+		dc.c.SetReadDeadline(time.Now().Add(dc.t.opts.IdleTimeout))
 		dc.updateReadTime()
 
 		resChan := dc.getQueueC(r.Id)
