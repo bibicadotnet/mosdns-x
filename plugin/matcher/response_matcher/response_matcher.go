@@ -100,24 +100,22 @@ type hasValidAnswer struct {
 
 var _ coremain.MatcherPlugin = (*hasValidAnswer)(nil)
 
+// match logic invariant: 
+// 1. qCtx.R() must not be nil (response phase).
+// 2. qCtx.Q() and qCtx.Q().Question[0] are validated by _misc_optm.
 func (e *hasValidAnswer) match(qCtx *query_context.Context) bool {
 	r := qCtx.R()
-	q := qCtx.Q()
-
-	// Minimal guards to ensure the plugin is self-contained and crash-proof.
-	// Negligible CPU cost compared to the performance gain from loop simplification.
-	if r == nil || q == nil || len(q.Question) == 0 {
+	if r == nil {
 		return false
 	}
 
-	// Optimization: Direct access to the primary question.
-	// Bypasses nested loops based on standard DNS query behavior.
-	question := q.Question[0]
+	// Trusted Invariant: qCtx.Q().Question[0] always exists after gatekeeper.
+	question := qCtx.Q().Question[0]
 
 	// Efficient linear scan of the Answer section.
 	for _, rr := range r.Answer {
 		h := rr.Header()
-		// Validating record against the original question.
+		// Semantic matching using pointer-stable values from the original question.
 		if h.Rrtype == question.Qtype &&
 			h.Class == question.Qclass &&
 			h.Name == question.Name {
