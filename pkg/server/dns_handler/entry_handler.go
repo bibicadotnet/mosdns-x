@@ -60,8 +60,7 @@ func NewEntryHandler(opts EntryHandlerOpts) (Handler, error) {
 }
 
 func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error) {
-	// 1. Optimization: Reuse parent context if it has a stricter deadline 
-	// to avoid unnecessary context allocations and timer overhead.
+	// 1. Context & Deadline Setup
 	qCtx := ctx
 	cancel := func() {}
 
@@ -71,26 +70,64 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 	}
 	defer cancel()
 
-	// 2. Format validation
-	if len(req.Question) == 0 {
-		h.opts.Logger.Debug("request has zero question")
-		return h.responseFormErr(req), nil
-	}
-	for _, question := range req.Question {
-		if _, ok := dns.IsDomainName(question.Name); !ok {
-			h.opts.Logger.Debug("invalid question name", zap.String("name", question.Name))
-			return h.responseFormErr(req), nil
-		}
+	// 2. Optimized Structural & Protocol Validation
+	// Fast structural check first (safeguard)
+	if len(req.Question) != 1 {
+		h.opts.Logger.Debug("refused: invalid question count", zap.Uint16("id", req.Id))
+		return h.responseRefused(req), nil
 	}
 
+	// Cheap header check
+	if req.Opcode != dns.OpcodeQuery {
+		h.opts.Logger.Debug("refused: unusual opcode", zap.Uint16("id", req.Id))
+		return h.responseRefused(req), nil
+	}
+
+	// 3. RFC 8482: Block ANY Queries Early
+	// Prevents DNS amplification by returning a minimal HINFO record.
+	q := req.Question[0]
+	if q.Qtype == dns.TypeANY {
+		h.opts.Logger.Debug("blocked: ANY query (RFC 8482)", zap.Uint16("id", req.Id))
+		r := new(dns.Msg)
+		r.SetReply(req)
+		r.Answer = []dns.RR{&dns.HINFO{
+			Hdr: dns.RR_Header{
+				Name:   q.Name,
+				Rrtype: dns.TypeHINFO,
+				Class:  dns.ClassINET,
+				Ttl:    8482,
+			},
+			Cpu: "ANY obsoleted",
+			Os:  "See RFC 8482",
+		}}
+		if h.opts.RecursionAvailable {
+			r.RecursionAvailable = true
+		}
+		return r, nil
+	}
+
+	// 4. Final Hygiene Checks
+	// Question[0] is safe to access at this point.
+	if q.Qclass != dns.ClassINET {
+		h.opts.Logger.Debug("refused: unsupported qclass", zap.Uint16("id", req.Id))
+		return h.responseRefused(req), nil
+	}
+
+	if req.Response || req.Authoritative || req.Truncated || 
+	   req.RecursionAvailable || req.Zero || len(req.Answer) != 0 || len(req.Ns) != 0 {
+		h.opts.Logger.Debug("refused: malformed header flags or sections", zap.Uint16("id", req.Id))
+		return h.responseRefused(req), nil
+	}
+
+	// 5. Execution Flow
+	// Downstream logic can now strictly assume Question[0] exists.
 	origID := req.Id
 	queryCtx := query_context.NewContext(req, meta)
 
-	// 3. Execution
 	err := h.opts.Entry.Exec(qCtx, queryCtx, nil)
 	respMsg := queryCtx.R()
 
-	// 4. Smart Logging (No spam for client cancellations/timeouts)
+	// 6. Logging
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			h.opts.Logger.Debug("query interrupted", queryCtx.InfoField(), zap.Error(err))
@@ -99,7 +136,7 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 		}
 	}
 
-	// 5. Response Finalization
+	// 7. Response Finalization
 	if respMsg == nil {
 		if err == nil {
 			h.opts.Logger.Error("entry returned with nil response", queryCtx.InfoField())
@@ -120,8 +157,17 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 	}
 	respMsg.Id = origID
 
-	// Always return nil error to prevent server from killing TCP/DoT connections
 	return respMsg, nil
+}
+
+func (h *EntryHandler) responseRefused(req *dns.Msg) *dns.Msg {
+	res := new(dns.Msg)
+	res.SetReply(req)
+	res.Rcode = dns.RcodeRefused
+	if h.opts.RecursionAvailable {
+		res.RecursionAvailable = true
+	}
+	return res
 }
 
 func (h *EntryHandler) responseFormErr(req *dns.Msg) *dns.Msg {
