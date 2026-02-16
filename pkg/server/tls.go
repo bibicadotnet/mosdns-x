@@ -120,9 +120,6 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 	cc.set(&c)
 	
 	// Start certificate watcher goroutine
-	// Note: This goroutine intentionally runs for the lifetime of the listener
-	// In mosdns-x, listeners are created once at startup and never hot-reloaded
-	// so this is not a goroutine leak
 	go func() {
 		watcher, err := fsnotify.NewWatcher()
 		if err != nil {
@@ -131,7 +128,6 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 		}
 		defer watcher.Close()
 		
-		// Check errors from watcher.Add
 		if err := watcher.Add(certFile); err != nil {
 			log.Printf("[WARN] Failed to watch certificate file %s: %v", certFile, err)
 		}
@@ -139,10 +135,13 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 			log.Printf("[WARN] Failed to watch key file %s: %v", keyFile, err)
 		}
 		
-		// Use NewTimer instead of AfterFunc to avoid benign race detection
-		// Timer is managed in single goroutine for clean race detector compliance
 		timer := time.NewTimer(0)
-		<-timer.C // Drain initial fire
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
 		
 		reloadCert := func() {
 			newCert, err := createFunc(certFile, keyFile)
@@ -153,6 +152,8 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 			cc.set(&newCert)
 			log.Printf("[INFO] Certificate reloaded successfully")
 		}
+
+		needReWatch := false
 		
 		for {
 			select {
@@ -162,41 +163,44 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 					return
 				}
 				
-				// Handle Remove/Rename events - need to re-add watcher
 				if e.Has(fsnotify.Remove) || e.Has(fsnotify.Rename) {
 					log.Printf("[INFO] Certificate file %s was removed/renamed, re-watching original paths", e.Name)
+					needReWatch = true
 					
-					// Re-add the original cert and key files, not e.Name
-					// This prevents watching temp files from certbot
-					// Remove first to avoid duplicate watches in fsnotify
-					time.AfterFunc(2*time.Second, func() {
-						_ = watcher.Remove(certFile)
-						_ = watcher.Remove(keyFile)
-						if err := watcher.Add(certFile); err != nil {
-							log.Printf("[WARN] Failed to re-watch certFile %s: %v", certFile, err)
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
 						}
-						if err := watcher.Add(keyFile); err != nil {
-							log.Printf("[WARN] Failed to re-watch keyFile %s: %v", keyFile, err)
-						}
-					})
-					
-					// Trigger reload with debounce
-					timer.Stop()
+					}
 					timer.Reset(2 * time.Second)
 					continue
 				}
 				
-				// Skip chmod-only events
 				if e.Has(fsnotify.Chmod) {
 					continue
 				}
 				
-				// Debounce reload for Write/Create events
-				timer.Stop()
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				timer.Reset(2 * time.Second)
 				
 			case <-timer.C:
-				// Timer fired - reload certificate
+				if needReWatch {
+					needReWatch = false
+					_ = watcher.Remove(certFile)
+					_ = watcher.Remove(keyFile)
+					if err := watcher.Add(certFile); err != nil {
+						log.Printf("[WARN] Failed to re-watch certFile %s: %v", certFile, err)
+					}
+					if err := watcher.Add(keyFile); err != nil {
+						log.Printf("[WARN] Failed to re-watch keyFile %s: %v", keyFile, err)
+					}
+				}
 				reloadCert()
 				
 			case err := <-watcher.Errors:
@@ -235,17 +239,13 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 			}
 			
 			// SNI filtering with silent fallback
-			// Many DoQ/DoT clients don't send SNI, so we accept all by default
 			if allowedSNI != "" && chi.ServerName != "" && chi.ServerName != allowedSNI {
 				// Silent fallback for compatibility
-				// For strict SNI checking: return nil, errors.New("SNI not allowed")
 			}
 			
 			return cert, nil
 		},
 	}, &quic.Config{
-		// 0-RTT enabled for DNS - acceptable for idempotent queries
-		// Disable if replay protection is critical for your use case
 		Allow0RTT:                      true,
 		InitialStreamReceiveWindow:     1252,
 		MaxStreamReceiveWindow:         4 * 1024,
@@ -266,9 +266,8 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 	
 	return eTLS.NewListener(l, &eTLS.Config{
 		SessionTicketKey: tlsSessionTicketKey,
-		KernelTX:         s.opts.KernelTX,
-		KernelRX:         s.opts.KernelRX,
-		// Early data enabled for TLS 1.3 - replay risk acceptable for DNS
+		KernelTX:          s.opts.KernelTX,
+		KernelRX:          s.opts.KernelRX,
 		AllowEarlyData:   true,
 		MaxEarlyData:     4096,
 		NextProtos:       nextProtos,
@@ -305,10 +304,8 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 			}
 			
 			// SNI filtering with silent fallback (same as QUIC)
-			// Many DoQ/DoT clients don't send SNI, so we accept all by default
 			if allowedSNI != "" && chi.ServerName != "" && chi.ServerName != allowedSNI {
 				// Silent fallback for compatibility
-				// For strict SNI checking: return nil, errors.New("SNI not allowed")
 			}
 			
 			return cert, nil
