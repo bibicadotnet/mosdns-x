@@ -3,6 +3,7 @@ package responsematcher
 import (
 	"context"
 	"io"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -104,8 +105,8 @@ func (e *hasValidAnswer) match(qCtx *query_context.Context) bool {
 
 	for _, rr := range r.Answer {
 		h := rr.Header()
-		// Using exported domain.EqualDNSName to handle case-insensitivity without redundant local code.
-		if h.Rrtype == target.Qtype && domain.EqualDNSName(h.Name, target.Name) {
+		// Case-insensitive comparison without allocation for upstream response validation.
+		if h.Rrtype == target.Qtype && strings.EqualFold(h.Name, target.Name) {
 			return true
 		}
 	}
