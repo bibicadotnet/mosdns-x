@@ -1,5 +1,7 @@
 /*
  * Copyright (C) 2020-2026, IrineSistiana
+ *
+ * This file is part of mosdns.
  */
 
 package querymatcher
@@ -25,7 +27,7 @@ const PluginType = "query_matcher"
 func init() {
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(Args) })
 
-	// Optimized presets using minimalist structs to bypass matcherGroup overhead
+	// Optimized presets using specialized structs for maximum performance
 	coremain.RegNewPersetPluginFunc(
 		"_qtype_A_AAAA",
 		func(bp *coremain.BP) (coremain.Plugin, error) {
@@ -47,7 +49,6 @@ func init() {
 	)
 }
 
-// Single interface assertion for the main plugin
 var _ coremain.MatcherPlugin = (*queryMatcher)(nil)
 
 type Args struct {
@@ -128,22 +129,24 @@ func newQueryMatcher(bp *coremain.BP, args *Args) (m *queryMatcher, err error) {
 
 // ----------------------------------------------------------------------------
 // Performance Optimized Preset Matchers
-// Logic Invariant: Only executed after _misc_optm gatekeeper validation.
+// Logic Invariant: Only executed after entry_handler gatekeeper validation.
 // ----------------------------------------------------------------------------
 
 type qTypeA_AAAA struct{ *coremain.BP }
+
 func (m *qTypeA_AAAA) Match(_ context.Context, qCtx *query_context.Context) (bool, error) {
-	// Directly access first question. Instruction efficient.
 	t := qCtx.Q().Question[0].Qtype
 	return t == dns.TypeA || t == dns.TypeAAAA, nil
 }
 
 type qTypeAAAA struct{ *coremain.BP }
+
 func (m *qTypeAAAA) Match(_ context.Context, qCtx *query_context.Context) (bool, error) {
 	return qCtx.Q().Question[0].Qtype == dns.TypeAAAA, nil
 }
 
 type queryIsEDNS0 struct{ *coremain.BP }
+
 func (q *queryIsEDNS0) Match(_ context.Context, qCtx *query_context.Context) (bool, error) {
 	return qCtx.Q().IsEdns0() != nil, nil
 }
