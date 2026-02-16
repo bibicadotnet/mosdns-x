@@ -71,21 +71,20 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 	defer cancel()
 
 	// 2. Optimized Structural & Protocol Validation
-	// Fast structural check first (safeguard)
 	if len(req.Question) != 1 {
 		h.opts.Logger.Debug("refused: invalid question count", zap.Uint16("id", req.Id))
 		return h.responseRefused(req), nil
 	}
 
-	// Cheap header check
 	if req.Opcode != dns.OpcodeQuery {
 		h.opts.Logger.Debug("refused: unusual opcode", zap.Uint16("id", req.Id))
 		return h.responseRefused(req), nil
 	}
 
-	// 3. RFC 8482: Block ANY Queries Early
-	// Prevents DNS amplification by returning a minimal HINFO record.
+	// 3. RFC 8482 & Early Noise Filtering
 	q := req.Question[0]
+
+	// Block ANY Queries Early (RFC 8482)
 	if q.Qtype == dns.TypeANY {
 		h.opts.Logger.Debug("blocked: ANY query (RFC 8482)", zap.Uint16("id", req.Id))
 		r := new(dns.Msg)
@@ -106,28 +105,54 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 		return r, nil
 	}
 
-	// 4. Final Hygiene Checks
-	// Question[0] is safe to access at this point.
+	// Block noisy qtypes (AAAA, PTR, HTTPS) - high volume, reject before context allocation
+	// Result: NODATA (Success with empty Answer)
+	if q.Qtype == dns.TypeAAAA || q.Qtype == dns.TypePTR || q.Qtype == dns.TypeHTTPS {
+		r := new(dns.Msg)
+		r.SetRcode(req, dns.RcodeSuccess)
+		if h.opts.RecursionAvailable {
+			r.RecursionAvailable = true
+		}
+		return r, nil
+	}
+
+	// 4. Domain Validation (Reject typos and missing TLD)
+	// Result: NXDOMAIN (Name Error)
+	name := q.Name
+	hasDot := false
+	for i := 0; i < len(name)-1; i++ {
+		c := name[i]
+		if !preRejectValidChar[c] {
+			return h.responseNXDomain(req), nil
+		}
+		if c == '.' {
+			hasDot = true
+		}
+	}
+	if !hasDot {
+		return h.responseNXDomain(req), nil
+	}
+
+	// 5. Final Hygiene Checks
 	if q.Qclass != dns.ClassINET {
 		h.opts.Logger.Debug("refused: unsupported qclass", zap.Uint16("id", req.Id))
 		return h.responseRefused(req), nil
 	}
 
-	if req.Response || req.Authoritative || req.Truncated || 
-	   req.RecursionAvailable || req.Zero || len(req.Answer) != 0 || len(req.Ns) != 0 {
+	if req.Response || req.Authoritative || req.Truncated ||
+		req.RecursionAvailable || req.Zero || len(req.Answer) != 0 || len(req.Ns) != 0 {
 		h.opts.Logger.Debug("refused: malformed header flags or sections", zap.Uint16("id", req.Id))
 		return h.responseRefused(req), nil
 	}
 
-	// 5. Execution Flow
-	// Downstream logic can now strictly assume Question[0] exists.
+	// 6. Execution Flow
 	origID := req.Id
 	queryCtx := query_context.NewContext(req, meta)
 
 	err := h.opts.Entry.Exec(qCtx, queryCtx, nil)
 	respMsg := queryCtx.R()
 
-	// 6. Logging
+	// 7. Logging
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			h.opts.Logger.Debug("query interrupted", queryCtx.InfoField(), zap.Error(err))
@@ -136,15 +161,15 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 		}
 	}
 
-	// 7. Response Finalization
+	// 8. Response Finalization
 	if respMsg == nil {
 		if err == nil {
 			h.opts.Logger.Error("entry returned with nil response", queryCtx.InfoField())
 		}
-		
+
 		respMsg = new(dns.Msg)
 		respMsg.SetReply(req)
-		
+
 		if err != nil {
 			respMsg.Rcode = dns.RcodeServerFailure
 		} else {
@@ -170,14 +195,32 @@ func (h *EntryHandler) responseRefused(req *dns.Msg) *dns.Msg {
 	return res
 }
 
-func (h *EntryHandler) responseFormErr(req *dns.Msg) *dns.Msg {
+func (h *EntryHandler) responseNXDomain(req *dns.Msg) *dns.Msg {
 	res := new(dns.Msg)
 	res.SetReply(req)
-	res.Rcode = dns.RcodeFormatError
+	res.Rcode = dns.RcodeNameError
 	if h.opts.RecursionAvailable {
 		res.RecursionAvailable = true
 	}
 	return res
+}
+
+var preRejectValidChar = [256]bool{
+	'.': true, '-': true, '_': true,
+	'0': true, '1': true, '2': true, '3': true, '4': true,
+	'5': true, '6': true, '7': true, '8': true, '9': true,
+	'a': true, 'b': true, 'c': true, 'd': true, 'e': true,
+	'f': true, 'g': true, 'h': true, 'i': true, 'j': true,
+	'k': true, 'l': true, 'm': true, 'n': true, 'o': true,
+	'p': true, 'q': true, 'r': true, 's': true, 't': true,
+	'u': true, 'v': true, 'w': true, 'x': true, 'y': true,
+	'z': true,
+	'A': true, 'B': true, 'C': true, 'D': true, 'E': true,
+	'F': true, 'G': true, 'H': true, 'I': true, 'J': true,
+	'K': true, 'L': true, 'M': true, 'N': true, 'O': true,
+	'P': true, 'Q': true, 'R': true, 'S': true, 'T': true,
+	'U': true, 'V': true, 'W': true, 'X': true, 'Y': true,
+	'Z': true,
 }
 
 type DummyServerHandler struct {
