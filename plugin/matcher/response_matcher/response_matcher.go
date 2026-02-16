@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2020-2026, IrineSistiana
- */
-
 package responsematcher
 
 import (
@@ -39,7 +35,6 @@ type Args struct {
 type responseMatcher struct {
 	*coremain.BP
 	args *Args
-
 	matcherGroup []executable_seq.Matcher
 	closer       []io.Closer
 }
@@ -69,10 +64,7 @@ func newResponseMatcher(bp *coremain.BP, args *Args) (m *responseMatcher, err er
 	}
 
 	if len(args.CNAME) > 0 {
-		mg, err := domain.BatchLoadDomainProvider(
-			args.CNAME,
-			bp.M().GetDataManager(),
-		)
+		mg, err := domain.BatchLoadDomainProvider(args.CNAME, bp.M().GetDataManager())
 		if err != nil {
 			return nil, err
 		}
@@ -100,29 +92,46 @@ type hasValidAnswer struct {
 
 var _ coremain.MatcherPlugin = (*hasValidAnswer)(nil)
 
-// match logic invariant: 
-// 1. qCtx.R() must not be nil (response phase).
-// 2. qCtx.Q() and qCtx.Q().Question[0] are validated by _misc_optm.
+// equalDNSName performs an ASCII case-insensitive comparison.
+// This is faster than strings.EqualFold as it avoids Unicode overhead.
+func equalDNSName(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		ca, cb := a[i], b[i]
+		if ca == cb {
+			continue
+		}
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 32
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 32
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
+}
+
 func (e *hasValidAnswer) match(qCtx *query_context.Context) bool {
 	r := qCtx.R()
 	if r == nil {
 		return false
 	}
 
-	// Trusted Invariant: qCtx.Q().Question[0] always exists after gatekeeper.
-	question := qCtx.Q().Question[0]
+	// Trusted Invariant: qCtx.Q().Question[0] is guaranteed by entry_handler.
+	target := qCtx.Q().Question[0]
 
-	// Efficient linear scan of the Answer section.
 	for _, rr := range r.Answer {
 		h := rr.Header()
-		// Semantic matching using pointer-stable values from the original question.
-		if h.Rrtype == question.Qtype &&
-			h.Class == question.Qclass &&
-			h.Name == question.Name {
+		// Only Type and Name are checked. Class is enforced as INET at Server Layer.
+		if h.Rrtype == target.Qtype && equalDNSName(h.Name, target.Name) {
 			return true
 		}
 	}
-
 	return false
 }
 
