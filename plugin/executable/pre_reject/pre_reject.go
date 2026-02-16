@@ -32,55 +32,72 @@ type preReject struct {
 	*coremain.BP
 }
 
-func (p *preReject) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
+func (p *preReject) Exec(
+	ctx context.Context,
+	qCtx *query_context.Context,
+	next executable_seq.ExecutableChainNode,
+) error {
+
 	q := qCtx.Q()
-	// Skip if packet is empty to avoid panics
-	if q == nil || len(q.Question) == 0 {
-		return executable_seq.ExecChainNode(ctx, qCtx, next)
-	}
+	q0 := q.Question[0]
+	qt := q0.Qtype
 
-	qt := q.Question[0].Qtype
+	// Block QTYPE
+	if qt == dns.TypeAAAA ||
+		qt == dns.TypePTR ||
+		qt == dns.TypeHTTPS {
 
-	// ====================================================================
-	// PHASE 1: QTYPE FILTERING (Noise reduction & protocol hygiene)
-	// ====================================================================
-	switch qt {
-	case dns.TypeAAAA, dns.TypePTR, dns.TypeHTTPS: // Drop IPv6, PTR, and HTTPS records early
-		// Return empty NOERROR (NODATA) with SOA for negative caching
 		qCtx.SetResponse(dnsutils.GenEmptyReply(q, dns.RcodeSuccess))
 		return nil
 	}
 
-	// ====================================================================
-	// PHASE 2: DOMAIN VALIDATION (Common human typing errors)
-	// ====================================================================
-	name := q.Question[0].Name
-	hasInternalDot := false
+	name := q0.Name
 
-	// Fast byte scan for invalid characters (faster than regex)
-	for i := 0; i < len(name)-1; i++ { // name ends with a trailing dot
+	hasDot := false
+
+	// ignore trailing dot
+	for i := 0; i < len(name)-1; i++ {
 		c := name[i]
-		if c == '.' {
-			hasInternalDot = true
-			continue
+
+		if !validChar[c] {
+			return reject(q, qCtx)
 		}
-		// Allow: alphanumeric, dash, underscore
-		// Reject: !, @, #, $, %, ^, &, *, spaces, etc.
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
-			return p.rejectNX(q, qCtx)
+
+		if c == '.' {
+			hasDot = true
 		}
 	}
 
-	// Reject if domain lacks a TLD (e.g. "google" instead of "google.com")
-	if !hasInternalDot {
-		return p.rejectNX(q, qCtx)
+	// Missing dot / TLD
+	if !hasDot {
+		return reject(q, qCtx)
 	}
 
 	return executable_seq.ExecChainNode(ctx, qCtx, next)
 }
 
-func (p *preReject) rejectNX(q *dns.Msg, qCtx *query_context.Context) error {
-	// Return NXDOMAIN with SOA for negative caching
+func reject(q *dns.Msg, qCtx *query_context.Context) error {
 	qCtx.SetResponse(dnsutils.GenEmptyReply(q, dns.RcodeNameError))
 	return nil
+}
+
+var validChar = [256]bool{
+	'.': true, '-': true, '_': true,
+
+	'0': true, '1': true, '2': true, '3': true, '4': true,
+	'5': true, '6': true, '7': true, '8': true, '9': true,
+
+	'a': true, 'b': true, 'c': true, 'd': true, 'e': true,
+	'f': true, 'g': true, 'h': true, 'i': true, 'j': true,
+	'k': true, 'l': true, 'm': true, 'n': true, 'o': true,
+	'p': true, 'q': true, 'r': true, 's': true, 't': true,
+	'u': true, 'v': true, 'w': true, 'x': true, 'y': true,
+	'z': true,
+
+	'A': true, 'B': true, 'C': true, 'D': true, 'E': true,
+	'F': true, 'G': true, 'H': true, 'I': true, 'J': true,
+	'K': true, 'L': true, 'M': true, 'N': true, 'O': true,
+	'P': true, 'Q': true, 'R': true, 'S': true, 'T': true,
+	'U': true, 'V': true, 'W': true, 'X': true, 'Y': true,
+	'Z': true,
 }
