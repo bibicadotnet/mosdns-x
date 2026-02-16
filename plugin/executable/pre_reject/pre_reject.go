@@ -45,16 +45,6 @@ func (p *preReject) Exec(ctx context.Context, qCtx *query_context.Context, next 
 	// PHASE 1: QTYPE FILTERING (Noise reduction & protocol hygiene)
 	// ====================================================================
 	switch qt {
-	case dns.TypeANY: // Reject ANY (255) - Prevents DNS Amplification abuse
-		r := new(dns.Msg)
-		r.SetReply(q)
-		r.Answer = []dns.RR{&dns.HINFO{
-			Hdr: dns.RR_Header{Name: q.Question[0].Name, Rrtype: dns.TypeHINFO, Ttl: 8482, Class: dns.ClassINET},
-			Cpu: "ANY obsoleted", Os: "See RFC 8482",
-		}}
-		qCtx.SetResponse(r)
-		return nil
-
 	case dns.TypeAAAA, dns.TypePTR, dns.TypeHTTPS: // Drop IPv6, PTR, and HTTPS records early
 		// Return empty NOERROR (NODATA) with SOA for negative caching
 		qCtx.SetResponse(dnsutils.GenEmptyReply(q, dns.RcodeSuccess))
