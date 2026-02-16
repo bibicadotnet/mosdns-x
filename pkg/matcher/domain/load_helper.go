@@ -380,27 +380,3 @@ func NewDomainMixMatcher() *MixMatcher[struct{}] {
 	mixMatcher.SetDefaultMatcher(MatcherDomain)
 	return mixMatcher
 }
-
-// EqualDNSName performs an ASCII case-insensitive comparison.
-// Exported for use in plugins to handle query matching efficiently.
-func EqualDNSName(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		ca, cb := a[i], b[i]
-		if ca == cb {
-			continue
-		}
-		if ca >= 'A' && ca <= 'Z' {
-			ca += 32
-		}
-		if cb >= 'A' && cb <= 'Z' {
-			cb += 32
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
-}
