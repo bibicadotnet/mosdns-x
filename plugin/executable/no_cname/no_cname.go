@@ -1,9 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- */
-
 package no_cname
 
 import (
@@ -31,14 +25,14 @@ type noCNAME struct {
 
 // Exec strips CNAME records and flattens responses.
 //
-// ⚠️ PIPELINE POSITION:
+// PIPELINE POSITION:
 // This plugin MUST be placed at the BOTTOM of your 'exec' sequence
 // (immediately before '- _return') to process responses first.
 //
 // Example YAML:
-//   - ... (other plugins)
-//   - _no_cname    <-- Place at the BOTTOM
-//   - _return
+//   - ... (other plugins)
+//   - _no_cname    <-- Place at the BOTTOM
+//   - _return
 func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	// 1. Upstream execution first (wait for response).
 	if err := executable_seq.ExecChainNode(ctx, qCtx, next); err != nil {
