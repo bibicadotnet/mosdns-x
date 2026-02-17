@@ -111,7 +111,7 @@ func (c *cert[T]) set(newCert *T) {
 	c.ptr.Store(newCert)
 }
 
-func (s *Server) tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, keyFile string, createFunc func(string, string) (T, error)) (*cert[T], error) {
+func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, keyFile string, createFunc func(string, string) (T, error), logger *zap.Logger) (*cert[T], error) {
 	c, err := createFunc(certFile, keyFile)
 	if err != nil {
 		return nil, err
@@ -119,8 +119,6 @@ func (s *Server) tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFi
 	
 	cc := &cert[T]{}
 	cc.set(&c)
-	
-	logger := s.opts.Logger
 
 	// Start certificate watcher goroutine
 	go func() {
@@ -225,7 +223,7 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 		return nil, errors.New("missing certificate for tls listener")
 	}
 	
-	c, err := s.tryCreateWatchCert(s.opts.Cert, s.opts.Key, tls.LoadX509KeyPair)
+	c, err := tryCreateWatchCert(s.opts.Cert, s.opts.Key, tls.LoadX509KeyPair, s.opts.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +263,7 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 		return nil, errors.New("missing certificate for tls listener")
 	}
 	
-	c, err := s.tryCreateWatchCert(s.opts.Cert, s.opts.Key, eTLS.LoadX509KeyPair)
+	c, err := tryCreateWatchCert(s.opts.Cert, s.opts.Key, eTLS.LoadX509KeyPair, s.opts.Logger)
 	if err != nil {
 		return nil, err
 	}
