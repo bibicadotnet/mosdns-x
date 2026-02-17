@@ -29,6 +29,12 @@ type EntryHandlerOpts struct {
 	Entry              executable_seq.Executable
 	QueryTimeout       time.Duration
 	RecursionAvailable bool
+
+	// New optional features for early blocking
+	BlockAAAA   bool
+	BlockPTR    bool
+	BlockHTTPS  bool
+	BlockNoDot  bool
 }
 
 func (opts *EntryHandlerOpts) Init() error {
@@ -99,8 +105,10 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 		return r, nil
 	}
 
-	// Block noisy qtypes (AAAA, PTR, HTTPS) - high volume, reject before context allocation
-	if q.Qtype == dns.TypeAAAA || q.Qtype == dns.TypePTR || q.Qtype == dns.TypeHTTPS {
+	// Early Noise Filtering based on options
+	if (h.opts.BlockAAAA && q.Qtype == dns.TypeAAAA) ||
+		(h.opts.BlockPTR && q.Qtype == dns.TypePTR) ||
+		(h.opts.BlockHTTPS && q.Qtype == dns.TypeHTTPS) {
 		r := new(dns.Msg)
 		r.SetRcode(req, dns.RcodeSuccess)
 		if h.opts.RecursionAvailable {
@@ -124,8 +132,8 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 		}
 	}
 
-	// Reject if no dot separator found (e.g., "localhost.")
-	if !hasDot {
+	// Optional check for missing dot separator (e.g., "localhost.")
+	if h.opts.BlockNoDot && !hasDot {
 		return h.responseNXDomain(req), nil
 	}
 
