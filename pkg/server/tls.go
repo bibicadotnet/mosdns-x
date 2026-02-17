@@ -14,6 +14,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/quic-go/quic-go"
 	eTLS "gitlab.com/go-extension/tls"
+	"go.uber.org/zap"
 )
 
 var statelessResetKey *quic.StatelessResetKey
@@ -110,7 +111,7 @@ func (c *cert[T]) set(newCert *T) {
 	c.ptr.Store(newCert)
 }
 
-func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, keyFile string, createFunc func(string, string) (T, error)) (*cert[T], error) {
+func (s *Server) tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, keyFile string, createFunc func(string, string) (T, error)) (*cert[T], error) {
 	c, err := createFunc(certFile, keyFile)
 	if err != nil {
 		return nil, err
@@ -119,6 +120,8 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 	cc := &cert[T]{}
 	cc.set(&c)
 	
+	logger := s.opts.Logger
+
 	// Start certificate watcher goroutine
 	go func() {
 		watcher, err := fsnotify.NewWatcher()
@@ -146,11 +149,11 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 		reloadCert := func() {
 			newCert, err := createFunc(certFile, keyFile)
 			if err != nil {
-				log.Printf("[ERROR] Failed to reload certificate: %v", err)
+				logger.Error("failed to reload certificate", zap.String("file", certFile), zap.Error(err))
 				return
 			}
 			cc.set(&newCert)
-			log.Printf("[INFO] Certificate reloaded successfully")
+			logger.Info("certificate reloaded successfully", zap.String("file", certFile))
 		}
 
 		needReWatch := false
@@ -222,7 +225,7 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 		return nil, errors.New("missing certificate for tls listener")
 	}
 	
-	c, err := tryCreateWatchCert(s.opts.Cert, s.opts.Key, tls.LoadX509KeyPair)
+	c, err := s.tryCreateWatchCert(s.opts.Cert, s.opts.Key, tls.LoadX509KeyPair)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +265,7 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 		return nil, errors.New("missing certificate for tls listener")
 	}
 	
-	c, err := tryCreateWatchCert(s.opts.Cert, s.opts.Key, eTLS.LoadX509KeyPair)
+	c, err := s.tryCreateWatchCert(s.opts.Cert, s.opts.Key, eTLS.LoadX509KeyPair)
 	if err != nil {
 		return nil, err
 	}
