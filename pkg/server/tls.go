@@ -25,7 +25,6 @@ func init() {
 	if err != nil {
 		log.Printf("[WARN] Failed to load persistent keys: %v, using ephemeral keys", err)
 		
-		// Generate ephemeral keys with error checking
 		var tmpResetKey quic.StatelessResetKey
 		if _, err := rand.Read(tmpResetKey[:]); err != nil {
 			log.Fatalf("[FATAL] Failed to generate ephemeral reset key: %v", err)
@@ -41,7 +40,6 @@ func init() {
 	}
 }
 
-// loadOrCreateKeys loads or creates separate keys for QUIC stateless reset and TLS session tickets
 func loadOrCreateKeys() (*quic.StatelessResetKey, []byte, error) {
 	execPath, err := os.Executable()
 	if err != nil {
@@ -53,13 +51,11 @@ func loadOrCreateKeys() (*quic.StatelessResetKey, []byte, error) {
 	resetKeyFile := filepath.Join(keyDir, ".mosdns_stateless_reset.key")
 	sessionKeyFile := filepath.Join(keyDir, ".mosdns_session_ticket.key")
 	
-	// Load or create stateless reset key
 	resetKey, err := loadOrCreateSingleKey(resetKeyFile, keyDir, "stateless reset")
 	if err != nil {
 		return nil, nil, err
 	}
 	
-	// Load or create session ticket key
 	sessionKey, err := loadOrCreateSingleKey(sessionKeyFile, keyDir, "session ticket")
 	if err != nil {
 		return nil, nil, err
@@ -72,24 +68,20 @@ func loadOrCreateKeys() (*quic.StatelessResetKey, []byte, error) {
 }
 
 func loadOrCreateSingleKey(keyFile string, keyDir string, keyType string) ([]byte, error) {
-	// Try to load existing key
 	if data, err := os.ReadFile(keyFile); err == nil && len(data) == 32 {
 		log.Printf("[INFO] Loaded %s key from: %s", keyType, keyFile)
 		return data, nil
 	}
 	
-	// Generate new key
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		return nil, err
 	}
 
-	// Create directory with restricted permissions (0700 instead of 0755)
 	if err := os.MkdirAll(keyDir, 0700); err != nil {
 		return nil, err
 	}
 	
-	// Write key file
 	if err := os.WriteFile(keyFile, key, 0600); err != nil {
 		return nil, err
 	}
@@ -98,7 +90,6 @@ func loadOrCreateSingleKey(keyFile string, keyDir string, keyType string) ([]byt
 	return key, nil
 }
 
-// cert is a thread-safe certificate holder using atomic operations
 type cert[T tls.Certificate | eTLS.Certificate] struct {
 	ptr atomic.Pointer[T]
 }
@@ -120,7 +111,6 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 	cc := &cert[T]{}
 	cc.set(&c)
 
-	// Start certificate watcher goroutine
 	go func() {
 		watcher, err := fsnotify.NewWatcher()
 		if err != nil {
@@ -236,6 +226,13 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 	return tr.ListenEarly(&tls.Config{
 		NextProtos:       nextProtos,
 		SessionTicketKey: tlsSessionTicketKey,
+
+		// Restrict curves to disable heavy Post-Quantum algorithms (ML-KEM) and reduce CPU usage
+		CurvePreferences: []tls.CurveID{
+			tls.X25519,
+			tls.CurveP256,
+		},
+
 		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			cert := c.get()
 			if cert == nil {
@@ -307,7 +304,6 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 				return nil, errors.New("certificate not available")
 			}
 			
-			// SNI filtering with silent fallback (same as QUIC)
 			if allowedSNI != "" && chi.ServerName != "" && chi.ServerName != allowedSNI {
 				// Silent fallback for compatibility
 			}
