@@ -1,9 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- */
-
 package dns_handler
 
 import (
@@ -115,24 +109,30 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 		return r, nil
 	}
 
-	// 4. Domain Validation (Reject typos and missing TLD)
+	// 4. Domain Validation & Lowercase Check (Single Pass)
 	name := q.Name
 	hasDot := false
+	hasUpper := false
+
+	// Skip the last root dot to check for valid TLD structure
 	for i := 0; i < len(name)-1; i++ {
 		c := name[i]
-		if !preRejectValidChar[c] {
-			return h.responseNXDomain(req), nil
-		}
 		if c == '.' {
 			hasDot = true
+		} else if c >= 'A' && c <= 'Z' {
+			hasUpper = true
 		}
 	}
+
+	// Reject if no dot separator found (e.g., "localhost.")
 	if !hasDot {
 		return h.responseNXDomain(req), nil
 	}
 
-	// Normalize domain to lowercase once at boundary.
-	req.Question[0].Name = strings.ToLower(name)
+	// Only perform allocation if uppercase characters were detected
+	if hasUpper {
+		req.Question[0].Name = strings.ToLower(name)
+	}
 
 	// 5. Final Hygiene Checks
 	if q.Qclass != dns.ClassINET {
@@ -204,22 +204,4 @@ func (h *EntryHandler) responseNXDomain(req *dns.Msg) *dns.Msg {
 		res.RecursionAvailable = true
 	}
 	return res
-}
-
-var preRejectValidChar = [256]bool{
-	'.': true, '-': true, '_': true,
-	'0': true, '1': true, '2': true, '3': true, '4': true,
-	'5': true, '6': true, '7': true, '8': true, '9': true,
-	'a': true, 'b': true, 'c': true, 'd': true, 'e': true,
-	'f': true, 'g': true, 'h': true, 'i': true, 'j': true,
-	'k': true, 'l': true, 'm': true, 'n': true, 'o': true,
-	'p': true, 'q': true, 'r': true, 's': true, 't': true,
-	'u': true, 'v': true, 'w': true, 'x': true, 'y': true,
-	'z': true,
-	'A': true, 'B': true, 'C': true, 'D': true, 'E': true,
-	'F': true, 'G': true, 'H': true, 'I': true, 'J': true,
-	'K': true, 'L': true, 'M': true, 'N': true, 'O': true,
-	'P': true, 'Q': true, 'R': true, 'S': true, 'T': true,
-	'U': true, 'V': true, 'W': true, 'X': true, 'Y': true,
-	'Z': true,
 }
