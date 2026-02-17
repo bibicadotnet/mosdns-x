@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package coremain
 
 import (
@@ -24,9 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/pprof"
-	"runtime"
-	"runtime/debug"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -125,7 +103,6 @@ func RunMosdns(cfg *Config) error {
 		}
 
 		m.addPlugin(p)
-		// Also add it to api mux if plugin implements http.Handler.
 		if h, ok := p.(http.Handler); ok {
 			m.httpAPIMux.Handle(fmt.Sprintf("/plugins/%s/", p.Tag()), h)
 		}
@@ -162,10 +139,6 @@ func RunMosdns(cfg *Config) error {
 		})
 	}
 
-	time.AfterFunc(time.Second*1, func() {
-		runtime.GC()
-		debug.FreeOSMemory()
-	})
 	<-m.sc.ReceiveCloseSignal()
 	m.sc.Done()
 	m.sc.CloseWait()
@@ -198,16 +171,10 @@ func (m *Mosdns) GetMatchers() map[string]executable_seq.Matcher {
 	return m.matchers
 }
 
-// GetMetricsReg returns a prometheus.Registerer with a prefix of "mosdns_"
 func (m *Mosdns) GetMetricsReg() prometheus.Registerer {
 	return prometheus.WrapRegistererWithPrefix("mosdns_", m.metricsReg)
 }
 
-// GetHTTPAPIMux returns the api http.ServeMux.
-// The pattern "/plugins/plugin_tag/" has been registered if
-// Plugin implements http.Handler interface.
-// Plugin caller should register path that has "/plugins/plugin_tag/"
-// prefix only.
 func (m *Mosdns) GetHTTPAPIMux() *http.ServeMux {
 	return m.httpAPIMux
 }
