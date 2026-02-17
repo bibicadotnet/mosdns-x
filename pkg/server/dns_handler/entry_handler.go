@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/miekg/dns"
@@ -107,7 +106,6 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 	}
 
 	// Block noisy qtypes (AAAA, PTR, HTTPS) - high volume, reject before context allocation
-	// Result: NODATA (Success with empty Answer)
 	if q.Qtype == dns.TypeAAAA || q.Qtype == dns.TypePTR || q.Qtype == dns.TypeHTTPS {
 		r := new(dns.Msg)
 		r.SetRcode(req, dns.RcodeSuccess)
@@ -118,7 +116,6 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 	}
 
 	// 4. Domain Validation (Reject typos and missing TLD)
-	// Result: NXDOMAIN (Name Error)
 	name := q.Name
 	hasDot := false
 	for i := 0; i < len(name)-1; i++ {
@@ -134,8 +131,7 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 		return h.responseNXDomain(req), nil
 	}
 
-    // Normalize domain to lowercase once at boundary.
-    // Downstream code (cache, matchers) can assume lowercase invariant.
+	// Normalize domain to lowercase once at boundary.
 	req.Question[0].Name = strings.ToLower(name)
 
 	// 5. Final Hygiene Checks
@@ -226,25 +222,4 @@ var preRejectValidChar = [256]bool{
 	'P': true, 'Q': true, 'R': true, 'S': true, 'T': true,
 	'U': true, 'V': true, 'W': true, 'X': true, 'Y': true,
 	'Z': true,
-}
-
-type DummyServerHandler struct {
-	T       *testing.T
-	WantMsg *dns.Msg
-	WantErr error
-}
-
-func (d *DummyServerHandler) ServeDNS(_ context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error) {
-	if d.WantErr != nil {
-		return nil, d.WantErr
-	}
-	var resp *dns.Msg
-	if d.WantMsg != nil {
-		resp = d.WantMsg.Copy()
-		resp.Id = req.Id
-	} else {
-		resp = new(dns.Msg)
-		resp.SetReply(req)
-	}
-	return resp, nil
 }
