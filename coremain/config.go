@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package coremain
 
 import (
@@ -55,6 +36,12 @@ type ServerConfig struct {
 	Exec      string                  `yaml:"exec"`
 	Timeout   uint                    `yaml:"timeout"` // (sec) query timeout.
 	Listeners []*ServerListenerConfig `yaml:"listeners"`
+
+	// Early blocking options
+	BlockAAAA  bool `yaml:"block_aaaa"`
+	BlockPTR   bool `yaml:"block_ptr"`
+	BlockHTTPS bool `yaml:"block_https"`
+	BlockNoDot bool `yaml:"block_no_dot"`
 }
 
 type ServerListenerConfig struct {
@@ -78,13 +65,13 @@ type ServerListenerConfig struct {
 
 	Cert                string `yaml:"cert"`                    // certificate path, used by dot, doh, doq
 	Key                 string `yaml:"key"`                     // certificate key path, used by dot, doh, doq
-	KernelTX            bool   `yaml:"kernel_tx"`               // use kernel tls to send data
-	KernelRX            bool   `yaml:"kernel_rx"`               // use kernel tls to receive data
-	URLPath             string `yaml:"url_path"`                // used by doh, http. If it's empty, any path will be handled.
-	HealthPath          string `yaml:"health_path"`             // health check endpoint path
-	RedirectURL         string `yaml:"redirect_url"`            // redirect URL for non-DNS paths
+	KernelTX            bool   `yaml:"kernel_tx"`                // use kernel tls to send data
+	KernelRX            bool   `yaml:"kernel_rx"`                // use kernel tls to receive data
+	URLPath             string `yaml:"url_path"`                 // used by doh, http. If it's empty, any path will be handled.
+	HealthPath          string `yaml:"health_path"`              // health check endpoint path
+	RedirectURL         string `yaml:"redirect_url"`             // redirect URL for non-DNS paths
 	GetUserIPFromHeader string `yaml:"get_user_ip_from_header"` // used by doh, http, except "True-Client-IP" "X-Real-IP" "X-Forwarded-For".
-	ProxyProtocol       bool   `yaml:"proxy_protocol"`          // accepting the PROXYProtocol
+	ProxyProtocol       bool   `yaml:"proxy_protocol"`           // accepting the PROXYProtocol
 
 	IdleTimeout uint `yaml:"idle_timeout"` // (sec) used by tcp, dot, doh as connection idle timeout.
 	AllowedSNI  string `yaml:"allowed_sni"` // 只允许指定的SNI访问
