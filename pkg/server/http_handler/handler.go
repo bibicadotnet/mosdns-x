@@ -29,6 +29,9 @@ import (
 
 var nopLogger = zap.NewNop()
 
+// proxyHeaders is defined as a package-level variable to avoid allocation on every request.
+var proxyHeaders = []string{"True-Client-IP", "X-Real-IP", "X-Forwarded-For"}
+
 type HandlerOpts struct {
 	DNSHandler  dns_handler.Handler
 	Path        string
@@ -235,9 +238,8 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 }
 
 func getRemoteAddr(req Request, customHeader string) (netip.Addr, error) {
-	// Priority check for common proxy headers
-	headers := []string{"True-Client-IP", "X-Real-IP", "X-Forwarded-For"}
-	for _, h := range headers {
+	// Priority check for common proxy headers using the static package-level slice
+	for _, h := range proxyHeaders {
 		if val := req.Header().Get(h); val != "" {
 			// Handle potential list in X-Forwarded-For (take first)
 			ipStr := val
@@ -255,7 +257,7 @@ func getRemoteAddr(req Request, customHeader string) (netip.Addr, error) {
 	// Check custom header if provided and not already checked
 	if customHeader != "" {
 		isStandard := false
-		for _, h := range headers {
+		for _, h := range proxyHeaders {
 			if strings.EqualFold(customHeader, h) {
 				isStandard = true
 				break
