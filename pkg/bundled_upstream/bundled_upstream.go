@@ -96,10 +96,6 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 			continue
 		}
 
-		if res.r == nil {
-			continue
-		}
-
 		// === Phase 2: Success Racing (Fast Path) ===
 		// Return immediately if any response has answer records.
 		var rcode int
@@ -128,7 +124,7 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 			newPrio = getRcodePriority(h.Rcode)
 		}
 
-		if bestFallbackRes == nil || newPrio > bestPrio {
+		if bestFallbackRaw == nil && bestFallbackRes == nil || newPrio > bestPrio {
 			bestFallbackRes = res.r
 			bestFallbackRaw = res.raw
 			bestPrio = newPrio
