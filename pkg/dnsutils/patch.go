@@ -153,11 +153,21 @@ type HeaderInfo struct {
 // GetHeaderInfo parses the DNS header without allocations.
 func GetHeaderInfo(msg []byte) (HeaderInfo, error) {
 	if len(msg) < 12 {
-		return HeaderInfo{}, ErrInvalidDNSMsg
+		return HeaderInfo{Rcode: -1}, ErrInvalidDNSMsg
 	}
 	return HeaderInfo{
 		ID:      binary.BigEndian.Uint16(msg[0:2]),
 		Rcode:   int(msg[3] & 0xF),
 		ANCount: binary.BigEndian.Uint16(msg[6:8]),
 	}, nil
+}
+
+// ShadowCopy returns a shallow copy of m. Only the header is copied.
+// This is useful for modifying the ID or flags without affecting the original.
+func ShadowCopy(m *dns.Msg) *dns.Msg {
+	if m == nil {
+		return nil
+	}
+	copy := *m
+	return &copy
 }

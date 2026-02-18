@@ -15,6 +15,7 @@ import (
 
 	"github.com/miekg/dns"
 	C "github.com/pmkol/mosdns-x/constant"
+	"github.com/pmkol/mosdns-x/pkg/dnsutils"
 	"github.com/pmkol/mosdns-x/pkg/pool"
 	"gitlab.com/go-extension/http"
 )
@@ -41,8 +42,9 @@ func (u *Upstream) ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.Msg, [
 }
 
 func (u *Upstream) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
-	m.Id = 0
-	wire, buf, err := pool.PackBuffer(m)
+	cm := dnsutils.ShadowCopy(m)
+	cm.Id = 0
+	wire, buf, err := pool.PackBuffer(cm)
 	if err != nil {
 		return nil, err
 	}
