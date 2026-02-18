@@ -1,0 +1,47 @@
+name: Release mosdns-x
+
+on:
+  workflow_dispatch:
+
+jobs:
+
+  build-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: get latest go version
+        id: go
+        run: |
+          echo version=1.25.5 >> $GITHUB_OUTPUT
+
+      - name: Set up Go
+        uses: actions/setup-go@v5.5.0
+        with:
+          go-version: ${{steps.go.outputs.version}}
+          cache: false
+
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.8'
+
+      - name: Build
+        run: |
+          echo "TAG_NAME=v$(date +'%y.%m.%d')" >> "$GITHUB_ENV"
+          python ./release.py
+        env:
+          CGO_ENABLED: '0'
+          GOEXPERIMENT: greenteagc
+          TZ: Asia/Ho_Chi_Minh
+
+      - name: Publish
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Mosdns-x ${{ env.TAG_NAME }}
+          tag_name: ${{ env.TAG_NAME }}
+          files: './release/mosdns*.zip'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

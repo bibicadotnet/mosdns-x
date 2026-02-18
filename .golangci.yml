@@ -1,0 +1,11 @@
+version: 2
+linters:
+  default: none
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/pmkol/mosdns-x
