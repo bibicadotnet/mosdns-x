@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package safe_close
 
 import "sync"
@@ -34,6 +15,7 @@ type SafeClose struct {
 	wg          sync.WaitGroup
 	closeSignal chan struct{}
 	done        chan struct{}
+	doneOnce    sync.Once
 	closeErr    error
 }
 
@@ -48,14 +30,7 @@ func NewSafeClose() *SafeClose {
 // It is concurrent safe and can be called multiple times.
 // CloseWait blocks until s.Done() is called and all Attach-ed goroutines is done.
 func (s *SafeClose) CloseWait() {
-	s.m.Lock()
-	select {
-	case <-s.closeSignal:
-	default:
-		close(s.closeSignal)
-	}
-	s.m.Unlock()
-
+	s.SendCloseSignal(nil)
 	s.wg.Wait()
 	<-s.done
 }
@@ -63,13 +38,17 @@ func (s *SafeClose) CloseWait() {
 // SendCloseSignal sends a close signal.
 func (s *SafeClose) SendCloseSignal(err error) {
 	s.m.Lock()
+	defer s.m.Unlock()
+
 	select {
 	case <-s.closeSignal:
+		return
 	default:
-		s.closeErr = err
+		if err != nil {
+			s.closeErr = err
+		}
 		close(s.closeSignal)
 	}
-	s.m.Unlock()
 }
 
 // Err returns the first SendCloseSignal error.
@@ -90,30 +69,22 @@ func (s *SafeClose) Attach(f func(done func(), closeSignal <-chan struct{})) {
 	s.m.Lock()
 	select {
 	case <-s.closeSignal:
+		s.m.Unlock()
+		return
 	default:
 		s.wg.Add(1)
-		go func() {
-			f(s.attachDone, s.closeSignal)
-		}()
 	}
 	s.m.Unlock()
-}
 
-func (s *SafeClose) attachDone() {
-	s.m.Lock()
-	defer s.m.Unlock()
-	s.wg.Done()
+	go func() {
+		f(s.wg.Done, s.closeSignal)
+	}()
 }
 
 // Done notifies CloseWait that is done.
 // It is concurrent safe and can be called multiple times.
 func (s *SafeClose) Done() {
-	s.m.Lock()
-	defer s.m.Unlock()
-
-	select {
-	case <-s.done:
-	default:
+	s.doneOnce.Do(func() {
 		close(s.done)
-	}
+	})
 }
