@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package executable_seq
 
 import (
@@ -165,6 +146,16 @@ type exprParamsPlaceHolder struct {
 	res map[string]exprResult
 }
 
+// Reset clears internal maps to prevent data leakage between requests when reused from sync.Pool.
+func (e *exprParamsPlaceHolder) Reset() {
+	for k := range e.f {
+		delete(e.f, k)
+	}
+	for k := range e.res {
+		delete(e.res, k)
+	}
+}
+
 func newExprParamsPlaceHolder() *exprParamsPlaceHolder {
 	return &exprParamsPlaceHolder{
 		f:   make(map[string]func() (bool, error)),
@@ -208,6 +199,9 @@ func (m *conditionMatcher) Match(ctx context.Context, qCtx *query_context.Contex
 	paramsPH, ok := m.paramsPHPool.Get().(*exprParamsPlaceHolder)
 	if !ok {
 		paramsPH = newExprParamsPlaceHolder()
+	} else {
+		// Fix: reset maps to avoid side effects from previous requests
+		paramsPH.Reset()
 	}
 	defer m.paramsPHPool.Put(paramsPH)
 
@@ -222,7 +216,13 @@ func (m *conditionMatcher) Match(ctx context.Context, qCtx *query_context.Contex
 	if err != nil {
 		return false, err
 	}
-	res := out.(bool)
+
+	// Fix: safe type assertion with comma-ok to prevent panic
+	res, ok := out.(bool)
+	if !ok {
+		return false, fmt.Errorf("condition expression '%s' returned non-boolean: %v", m.expr.String(), out)
+	}
+
 	m.lg.Debug(
 		"condition matcher result",
 		paramsPH.makeResultZapFields(qCtx.InfoField(), res)...,
