@@ -1,0 +1,28 @@
+name: Test mosdns
+
+on:
+  push:
+  pull_request:
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: get latest go version
+        id: go
+        run: |
+          echo version=1.25.5 >> $GITHUB_OUTPUT
+
+      - name: Set up Go
+        uses: actions/setup-go@v5.5.0
+        with:
+          go-version: ${{steps.go.outputs.version}}
+          cache: false
+
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Test Build
+        run: go build
