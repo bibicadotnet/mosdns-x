@@ -140,7 +140,7 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 
 	// === Phase 4: Final Result Selection ===
 	// 1. Best semantic error (NXDOMAIN > NODATA > SERVFAIL)
-	if bestFallbackRes != nil {
+	if bestFallbackRes != nil || bestFallbackRaw != nil {
 		return bestFallbackRes, bestFallbackRaw, nil
 	}
 

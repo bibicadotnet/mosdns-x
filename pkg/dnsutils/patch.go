@@ -92,7 +92,7 @@ func skipName(msg []byte, off int) (int, error) {
 		}
 		// Label length
 		l := int(c)
-		if off+1+l > len(msg) {
+		if l > 63 || off+1+l > len(msg) {
 			return 0, ErrInvalidDNSMsg
 		}
 		off += l + 1
