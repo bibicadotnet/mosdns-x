@@ -28,11 +28,10 @@ type TCPConn struct {
 	sync.Mutex
 	net.Conn
 	handler dns_handler.Handler
-	meta    *C.RequestMeta
 }
 
-func (c *TCPConn) ServeDNS(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
-	return c.handler.ServeDNS(ctx, req, c.meta)
+func (c *TCPConn) ServeDNS(ctx context.Context, req *dns.Msg, meta *C.RequestMeta) (*dns.Msg, error) {
+	return c.handler.ServeDNS(ctx, req, meta)
 }
 
 func (c *TCPConn) WriteRawMsg(b []byte) (int, error) {
@@ -112,7 +111,6 @@ func (s *Server) handleConnectionTcp(ctx context.Context, c *TCPConn) {
 		protocol = C.ProtocolTLS
 	}
 	meta.SetProtocol(protocol)
-	c.meta = meta
 
 	idleTimeout := s.opts.IdleTimeout
 	if idleTimeout <= 0 {
@@ -123,22 +121,25 @@ func (s *Server) handleConnectionTcp(ctx context.Context, c *TCPConn) {
 	c.SetReadDeadline(time.Now().Add(min(idleTimeout, tcpFirstReadTimeout)))
 
 	for {
-		req, _, err := dnsutils.ReadMsgFromTCP(c)
+		req := pool.GetMsg()
+		_, err := dnsutils.ReadMsgFromTCP(c, req)
 		if err != nil {
+			pool.ReleaseMsg(req)
 			return
 		}
 
-		go s.handleQueryTcp(connCtx, c, req, idleTimeout)
+		go s.handleQueryTcp(connCtx, c, req, meta)
 
 		c.SetReadDeadline(time.Now().Add(idleTimeout))
 	}
 }
 
-func (s *Server) handleQueryTcp(ctx context.Context, c *TCPConn, req *dns.Msg, timeout time.Duration) {
-	qCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+func (s *Server) handleQueryTcp(ctx context.Context, c *TCPConn, req *dns.Msg, meta *C.RequestMeta) {
+	s.wg.Add(1)
+	defer s.wg.Done()
+	defer pool.ReleaseMsg(req)
 
-	r, err := c.ServeDNS(qCtx, req)
+	r, err := c.ServeDNS(ctx, req, meta)
 	if err != nil {
 		s.opts.Logger.Debug("handler err", zap.Error(err))
 		return

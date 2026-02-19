@@ -12,6 +12,7 @@ import (
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
 
+	"github.com/pmkol/mosdns-x/pkg/pool"
 	"github.com/pmkol/mosdns-x/pkg/utils"
 )
 
@@ -27,7 +28,7 @@ const (
 	defaultDialTimeout             = time.Second * 7
 	defaultNoConnReuseQueryTimeout = time.Second * 7
 	defaultMaxConns                = 2
-	defaultMaxQueryPerConn          = 65535
+	defaultMaxQueryPerConn         = 65535
 
 	writeTimeout        = time.Second
 	connTooOldThreshold = time.Millisecond * 1500
@@ -46,7 +47,7 @@ type Opts struct {
 	WriteFunc func(c io.Writer, m *dns.Msg) (int, error)
 	// ReadFunc specifies the method to read a wire dns msg from the connection
 	// opened by the DialFunc.
-	ReadFunc func(c io.Reader) (*dns.Msg, int, error)
+	ReadFunc func(c io.Reader, m *dns.Msg) (int, error)
 
 	// DialTimeout specifies the timeout for DialFunc.
 	// Default is defaultDialTimeout.
@@ -216,8 +217,9 @@ func (t *Transport) exchangeWithoutConnReuse(ctx context.Context, m *dns.Msg) (*
 
 	resChan := make(chan *result, 1)
 	go func() {
-		b, _, err := t.opts.ReadFunc(conn)
-		resChan <- &result{b, err}
+		m := new(dns.Msg) // Or pool.GetMsg() if we can ensure release
+		_, err := t.opts.ReadFunc(conn, m)
+		resChan <- &result{m, err}
 	}()
 
 	select {
@@ -490,8 +492,10 @@ func (dc *dnsConn) dialAndRead() {
 func (dc *dnsConn) readLoop() {
 	dc.c.SetReadDeadline(time.Now().Add(dc.t.opts.IdleTimeout))
 	for {
-		r, _, err := dc.t.opts.ReadFunc(dc.c)
+		r := pool.GetMsg()
+		_, err := dc.t.opts.ReadFunc(dc.c, r)
 		if err != nil {
+			pool.ReleaseMsg(r)
 			dc.closeWithErr(err) // abort this connection.
 			return
 		}

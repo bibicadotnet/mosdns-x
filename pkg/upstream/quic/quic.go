@@ -192,7 +192,8 @@ func exchange(ctx context.Context, conn *Conn, q *dns.Msg) (*dns.Msg, error) {
 		return nil, err
 	}
 	stream.Close()
-	r, _, err := dnsutils.ReadMsgFromTCP(stream)
+	r := new(dns.Msg)
+	_, err = dnsutils.ReadMsgFromTCP(stream, r)
 	if err != nil {
 		stream.CancelRead(1)
 		return nil, err

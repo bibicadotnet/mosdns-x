@@ -105,20 +105,30 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 			for {
 				stream, err := c.AcceptStream(quicConnCtx)
 				if err != nil {
+					// If AcceptStream fails, the connection is likely in a bad state or closed.
+					// Close the quic connection with an error code.
 					closer.close(1)
 					return
 				}
+				s.wg.Add(1)
 				go func() {
-					req, _, err := dnsutils.ReadMsgFromTCP(stream)
-					timeout.Reset(idleTimeout)
+					defer s.wg.Done()
+					defer stream.Close() // Close the stream when done
+
+					req := pool.GetMsg()
+					defer pool.ReleaseMsg(req)
+
+					timeout.Reset(idleTimeout)                     // Move reset before read
+					_, err := dnsutils.ReadMsgFromTCP(stream, req) // Update call signature
 					if err != nil {
 						stream.CancelRead(1)
 						stream.CancelWrite(1)
+						// If reading from stream fails, it's a stream-level error, not necessarily connection-level.
+						// No need to close the entire quic connection here.
 						return
 					}
 
-					defer stream.Close()
-					stream.CancelRead(0)
+					stream.CancelRead(0) // Successfully read, cancel read with no error
 
 					if req.Id != 0 {
 						stream.CancelWrite(1)

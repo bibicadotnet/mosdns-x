@@ -188,16 +188,22 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 			return
 		}
 
-		// Security: Use LimitReader to prevent OOM from malicious large bodies
-		b, err = io.ReadAll(io.LimitReader(req.Body(), dns.MaxMsgSize+1))
-		if err != nil {
+		// Security: Use pooled buffer to prevent excessive heap allocation
+		buf := pool.GetBuf(dns.MaxMsgSize + 1)
+		defer buf.Release()
+
+		// Read body into pooled buffer
+		n, err := io.ReadAtLeast(req.Body(), buf.AllBytes(), 1)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if len(b) > dns.MaxMsgSize {
+
+		if n > dns.MaxMsgSize {
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			return
 		}
+		b = buf.Bytes()[:n]
 
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)

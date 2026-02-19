@@ -88,7 +88,9 @@ func (s *Server) ServeUDP(c net.PacketConn) error {
 		}
 
 		// handle query
+		s.wg.Add(1)
 		go func() {
+			defer s.wg.Done()
 			defer pool.ReleaseMsg(q)
 			meta := C.NewRequestMeta(clientAddr)
 			meta.SetProtocol(C.ProtocolUDP)

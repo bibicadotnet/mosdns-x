@@ -87,6 +87,7 @@ type Server struct {
 	m             sync.Mutex
 	closed        bool
 	closerTracker map[io.Closer]struct{}
+	wg            sync.WaitGroup
 }
 
 func NewServer(opts ServerOpts) *Server {
@@ -127,9 +128,8 @@ func (s *Server) trackCloser(c io.Closer, add bool) bool {
 // Close closes the Server and all its inner listeners.
 func (s *Server) Close() {
 	s.m.Lock()
-	defer s.m.Unlock()
-
 	if s.closed {
+		s.m.Unlock()
 		return
 	}
 
@@ -137,4 +137,6 @@ func (s *Server) Close() {
 	for closer := range s.closerTracker {
 		closer.Close()
 	}
+	s.m.Unlock()
+	s.wg.Wait()
 }
