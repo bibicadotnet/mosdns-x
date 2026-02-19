@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"sync/atomic"
@@ -110,57 +111,59 @@ func (r *RedisCache) disableClient() {
 	}
 }
 
-func (r *RedisCache) Get(key string) (v []byte, storedTime, expirationTime time.Time) {
+func (r *RedisCache) Get(key uint64) (v []byte, storedTime, expirationTime int64) {
 	if r.disabled() {
-		return nil, time.Time{}, time.Time{}
+		return nil, 0, 0
 	}
 
+	strKey := fmt.Sprintf("%016x", key)
 	ctx, cancel := context.WithTimeout(context.Background(), r.opts.ClientTimeout)
 	defer cancel()
-	b, err := r.opts.Client.Get(ctx, key).Bytes()
+	b, err := r.opts.Client.Get(ctx, strKey).Bytes()
 	if err != nil {
 		if err != redis.Nil {
 			r.opts.Logger.Warn("redis get", zap.Error(err))
 			r.disableClient()
 		}
-		return nil, time.Time{}, time.Time{}
+		return nil, 0, 0
 	}
 
-	storedTime, expirationTime, m, err := unpackRedisValue(b)
+	st, et, m, err := unpackRedisValue(b)
 	if err != nil {
 		r.opts.Logger.Warn("redis data unpack error", zap.Error(err))
-		return nil, time.Time{}, time.Time{}
+		return nil, 0, 0
 	}
-	return m, storedTime, expirationTime
+	return m, st, et
 }
 
 // Store stores kv into redis.
-func (r *RedisCache) Store(key string, v []byte, storedTime, expirationTime time.Time) {
+func (r *RedisCache) Store(key uint64, v []byte, storedTime, expirationTime int64) {
 	if r.disabled() {
 		return
 	}
 
-	now := time.Now()
-	ttl := expirationTime.Sub(now)
-	if ttl <= 0 { // For redis, zero ttl means the key has no expiration time.
+	now := time.Now().Unix()
+	ttl := expirationTime - now
+	if ttl <= 0 {
 		return
 	}
 
+	strKey := fmt.Sprintf("%016x", key)
 	data := packRedisData(storedTime, expirationTime, v)
 	defer data.Release()
 	ctx, cancel := context.WithTimeout(context.Background(), r.opts.ClientTimeout)
 	defer cancel()
-	if err := r.opts.Client.Set(ctx, key, data.Bytes(), ttl).Err(); err != nil {
+	if err := r.opts.Client.Set(ctx, strKey, data.Bytes(), time.Duration(ttl)*time.Second).Err(); err != nil {
 		r.opts.Logger.Warn("redis set", zap.Error(err))
 		r.disableClient()
 	}
 }
 
 type KV struct {
-	Key            string
+	Key            uint64
 	V              []byte
-	StoreTime      time.Time
-	ExpirationTime time.Time
+	StoreTime      int64
+	ExpirationTime int64
 }
 
 // BatchStore stores a batch of kv into redis via redis pipeline.
@@ -174,15 +177,16 @@ func (r *RedisCache) BatchStore(b []KV) {
 	pipeline := r.opts.Client.Pipeline()
 	buffers := make([]*pool.Buffer, 0, len(b))
 	for _, kv := range b {
-		now := time.Now()
-		ttl := kv.ExpirationTime.Sub(now)
+		now := time.Now().Unix()
+		ttl := kv.ExpirationTime - now
 		if ttl <= 0 {
 			continue
 		}
 
+		strKey := fmt.Sprintf("%016x", kv.Key)
 		data := packRedisData(kv.StoreTime, kv.ExpirationTime, kv.V)
 		buffers = append(buffers, data)
-		pipeline.Set(ctx, kv.Key, data.Bytes(), ttl)
+		pipeline.Set(ctx, strKey, data.Bytes(), time.Duration(ttl)*time.Second)
 	}
 
 	if _, err := pipeline.Exec(ctx); err != nil {
@@ -215,20 +219,20 @@ func (r *RedisCache) Len() int {
 
 // packRedisData packs storedTime, expirationTime and v into one byte slice.
 // The returned []byte should be released by pool.ReleaseBuf().
-func packRedisData(storedTime, expirationTime time.Time, v []byte) *pool.Buffer {
+func packRedisData(storedTime, expirationTime int64, v []byte) *pool.Buffer {
 	buf := pool.GetBuf(8 + 8 + len(v))
 	b := buf.Bytes()
-	binary.BigEndian.PutUint64(b[:8], uint64(storedTime.Unix()))
-	binary.BigEndian.PutUint64(b[8:16], uint64(expirationTime.Unix()))
+	binary.BigEndian.PutUint64(b[:8], uint64(storedTime))
+	binary.BigEndian.PutUint64(b[8:16], uint64(expirationTime))
 	copy(b[16:], v)
 	return buf
 }
 
-func unpackRedisValue(b []byte) (storedTime, expirationTime time.Time, v []byte, err error) {
+func unpackRedisValue(b []byte) (storedTime, expirationTime int64, v []byte, err error) {
 	if len(b) < 16 {
-		return time.Time{}, time.Time{}, nil, errors.New("b is too short")
+		return 0, 0, nil, errors.New("b is too short")
 	}
-	storedTime = time.Unix(int64(binary.BigEndian.Uint64(b[:8])), 0)
-	expirationTime = time.Unix(int64(binary.BigEndian.Uint64(b[8:16])), 0)
+	storedTime = int64(binary.BigEndian.Uint64(b[:8]))
+	expirationTime = int64(binary.BigEndian.Uint64(b[8:16]))
 	return storedTime, expirationTime, b[16:], nil
 }

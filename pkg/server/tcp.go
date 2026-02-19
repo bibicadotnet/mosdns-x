@@ -31,7 +31,7 @@ type TCPConn struct {
 	meta    *C.RequestMeta
 }
 
-func (c *TCPConn) ServeDNS(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
+func (c *TCPConn) ServeDNS(ctx context.Context, req *dns.Msg) (*dns.Msg, []byte, error) {
 	return c.handler.ServeDNS(ctx, req, c.meta)
 }
 
@@ -67,7 +67,7 @@ func (s *Server) ServeTCP(l net.Listener) error {
 			if s.Closed() {
 				return ErrServerClosed
 			}
-			// Only continue if it's a net.Error timeout. 
+			// Only continue if it's a net.Error timeout.
 			// Other fatal errors return to let the supervisor restart the process.
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
@@ -123,12 +123,15 @@ func (s *Server) handleConnectionTcp(ctx context.Context, c *TCPConn) {
 	c.SetReadDeadline(time.Now().Add(min(idleTimeout, tcpFirstReadTimeout)))
 
 	for {
-		req, _, err := dnsutils.ReadMsgFromTCP(c)
+		req, rawReq, _, err := dnsutils.ReadMsgFromTCP(c.Conn)
 		if err != nil {
 			return
 		}
+		// We can use rawReq for zero-alloc if we pass it through.
+		// For now, let's just use req.
+		_ = rawReq
 
-		s.handleQueryTcp(connCtx, c, req, idleTimeout)
+		go s.handleQueryTcp(connCtx, c, req, idleTimeout)
 
 		c.SetReadDeadline(time.Now().Add(idleTimeout))
 	}
@@ -138,9 +141,17 @@ func (s *Server) handleQueryTcp(ctx context.Context, c *TCPConn, req *dns.Msg, t
 	qCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	r, err := c.ServeDNS(qCtx, req)
+	r, rawR, err := c.ServeDNS(qCtx, req)
 	if err != nil {
 		s.opts.Logger.Debug("handler err", zap.Error(err))
+		return
+	}
+
+	if rawR != nil {
+		_, err = c.WriteRawMsg(rawR)
+		if err != nil {
+			s.opts.Logger.Debug("failed to write response", zap.Stringer("client", c.RemoteAddr()), zap.Error(err))
+		}
 		return
 	}
 

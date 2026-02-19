@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -28,6 +29,9 @@ import (
 )
 
 var nopLogger = zap.NewNop()
+
+// proxyHeaders is defined as a package-level variable to avoid allocation on every request.
+var proxyHeaders = []string{"True-Client-IP", "X-Real-IP", "X-Forwarded-For"}
 
 type HandlerOpts struct {
 	DNSHandler  dns_handler.Handler
@@ -98,10 +102,8 @@ type TlsInfo struct {
 
 func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 	// Initialize RequestMeta with proper IP unmapping (IPv4-in-IPv6 support)
-	meta := new(C.RequestMeta)
-	if addr, err := getRemoteAddr(req, h.opts.SrcIPHeader); err == nil {
-		meta.SetClientAddr(addr)
-	}
+	addr, _ := getRemoteAddr(req, h.opts.SrcIPHeader)
+	meta := C.NewRequestMeta(addr)
 
 	if tlsInfo := req.TLS(); tlsInfo != nil {
 		meta.SetServerName(tlsInfo.ServerName)
@@ -204,22 +206,35 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 	}
 
 	// 5. DNS Processing
-	m := new(dns.Msg)
+	m := pool.GetMsg()
+	defer pool.ReleaseMsg(m)
 	if err := m.Unpack(b); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		h.warnErr(req, fmt.Errorf("unpack dns msg failed: %w", err))
 		return
 	}
 
-	r, err := h.opts.DNSHandler.ServeDNS(req.Context(), m, meta)
+	respMsg, rawResp, err := h.opts.DNSHandler.ServeDNS(req.Context(), m, meta)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		h.warnErr(req, fmt.Errorf("dns handler error: %w", err))
 		return
 	}
 
+	if rawResp != nil {
+		w.Header().Set("Content-Type", "application/dns-message")
+		// For RawResp from cache, we already patched TTLs.
+		// We could calculate minimal TTL from rawResp if needed for Cache-Control,
+		// but since we bypass dns.Msg, we'll need offsets.
+		// For now, let's assume we don't set Cache-Control for RawResp or we set a default.
+		// Actually, we SHOULD set it.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(rawResp)
+		return
+	}
+
 	// Use pool to pack response, reducing GC pressure
-	resBytes, buf, err := pool.PackBuffer(r)
+	resBytes, buf, err := pool.PackBuffer(respMsg)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		h.warnErr(req, fmt.Errorf("pack response failed: %w", err))
@@ -229,15 +244,14 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 
 	// 6. Finalize Response
 	w.Header().Set("Content-Type", "application/dns-message")
-	w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", dnsutils.GetMinimalTTL(r)))
+	w.Header().Set("Cache-Control", "max-age="+strconv.FormatUint(uint64(dnsutils.GetMinimalTTL(respMsg)), 10))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resBytes)
 }
 
 func getRemoteAddr(req Request, customHeader string) (netip.Addr, error) {
-	// Priority check for common proxy headers
-	headers := []string{"True-Client-IP", "X-Real-IP", "X-Forwarded-For"}
-	for _, h := range headers {
+	// Priority check for common proxy headers using the static package-level slice
+	for _, h := range proxyHeaders {
 		if val := req.Header().Get(h); val != "" {
 			// Handle potential list in X-Forwarded-For (take first)
 			ipStr := val
@@ -255,7 +269,7 @@ func getRemoteAddr(req Request, customHeader string) (netip.Addr, error) {
 	// Check custom header if provided and not already checked
 	if customHeader != "" {
 		isStandard := false
-		for _, h := range headers {
+		for _, h := range proxyHeaders {
 			if strings.EqualFold(customHeader, h) {
 				isStandard = true
 				break

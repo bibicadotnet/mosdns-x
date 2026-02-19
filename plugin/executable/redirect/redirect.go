@@ -1,7 +1,3 @@
-/*
- * Copyright (C) 2020-2026, IrineSistiana
- */
-
 package redirect
 
 import (
@@ -76,7 +72,7 @@ func newRedirect(bp *coremain.BP, args *Args) (*redirectPlugin, error) {
 
 func (r *redirectPlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	q := qCtx.Q()
-	// Basic defensive guard for malformed queries
+	// Guard: Minimal safety for INET queries
 	if q == nil || len(q.Question) != 1 || q.Question[0].Qclass != dns.ClassINET {
 		return executable_seq.ExecChainNode(ctx, qCtx, next)
 	}
@@ -87,43 +83,50 @@ func (r *redirectPlugin) Exec(ctx context.Context, qCtx *query_context.Context, 
 		return executable_seq.ExecChainNode(ctx, qCtx, next)
 	}
 
-	// Change query name to the redirect target for upstream processing
+	// PHASE 1: Forward Path - Rewrite Request
 	q.Question[0].Name = redirectTarget
 	err := executable_seq.ExecChainNode(ctx, qCtx, next)
 
-	if resp := qCtx.R(); resp != nil {
-		// 1. Restore the original query name in the Question section
-		// Since we guarded len == 1 above, we only need to check the first question
-		if len(resp.Question) > 0 && resp.Question[0].Name == redirectTarget {
-			resp.Question[0].Name = orgQName
-		}
-
-		// 2. In-place filtering and rewriting (Zero-allocation optimization)
-		// We reuse the existing Answer slice to avoid heap allocation.
-		n := 0
-		for _, rr := range resp.Answer {
-			h := rr.Header()
-			if h == nil {
-				continue
-			}
-
-			// Skip CNAME records to hide the redirection logic from the client
-			if h.Rrtype == dns.TypeCNAME {
-				continue
-			}
-
-			// Rewrite the record name back to the original query name
-			if h.Name == redirectTarget {
-				h.Name = orgQName
-			}
-
-			// Keep this record by moving it to the front of the slice
-			resp.Answer[n] = rr
-			n++
-		}
-		// Truncate the slice to the new filtered length
-		resp.Answer = resp.Answer[:n]
+	// PHASE 2: Reverse Path - Restore Protocol Integrity
+	resp := qCtx.R()
+	if resp == nil {
+		return err
 	}
+
+	// Deterministic Restore: Force orgQName on Question section.
+	// Faster than string comparison and resilient against upstream normalization.
+	if len(resp.Question) > 0 {
+		resp.Question[0].Name = orgQName
+	}
+
+	// Early exit if no answers exist (e.g., NXDOMAIN, SERVFAIL, NODATA)
+	if len(resp.Answer) == 0 {
+		return err
+	}
+
+	// PHASE 3: High-Performance Filtering (In-place & Zero-allocation)
+	// Uses index-based loop for better CPU cache utilization and branch prediction.
+	ans := resp.Answer
+	n := 0
+	for i := 0; i < len(ans); i++ {
+		rr := ans[i]
+		h := rr.Header() // Header is never nil for valid DNS RRs decoded by mosdns
+
+		// Stealth: Strip CNAME records to hide internal redirection logic
+		if h.Rrtype == dns.TypeCNAME {
+			continue
+		}
+
+		// Flattening: Rewrite record name back to the original query name (Pointer swap)
+		if h.Name == redirectTarget {
+			h.Name = orgQName
+		}
+
+		ans[n] = rr
+		n++
+	}
+	// Truncate the slice to the filtered length
+	resp.Answer = ans[:n]
 
 	return err
 }

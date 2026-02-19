@@ -64,18 +64,35 @@ func ReadRawMsgFromTCP(c io.Reader) (*pool.Buffer, int, error) {
 	return buf, n, nil
 }
 
-// ReadMsgFromTCP reads msg from c in RFC 1035 format (msg is prefixed
-// with a two byte length field).
-// n represents how many bytes are read from c.
-func ReadMsgFromTCP(c io.Reader) (*dns.Msg, int, error) {
+// ReadLazyMsgFromTCP reads msg from c in RFC 1035 format but skips Unpack.
+func ReadLazyMsgFromTCP(c io.Reader) (*dns.Msg, []byte, int, error) {
 	b, n, err := ReadRawMsgFromTCP(c)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, n, err
 	}
 	defer b.Release()
 
-	m, err := unpackMsgWithDetailedErr(b.Bytes())
-	return m, n, err
+	raw := make([]byte, len(b.Bytes()))
+	copy(raw, b.Bytes())
+
+	return nil, raw, n, nil
+}
+
+// ReadMsgFromTCP reads msg from c in RFC 1035 format (msg is prefixed
+// with a two byte length field).
+// n represents how many bytes are read from c.
+func ReadMsgFromTCP(c io.Reader) (*dns.Msg, []byte, int, error) {
+	b, n, err := ReadRawMsgFromTCP(c)
+	if err != nil {
+		return nil, nil, n, err
+	}
+	defer b.Release()
+
+	raw := make([]byte, len(b.Bytes()))
+	copy(raw, b.Bytes())
+
+	m, err := unpackMsgWithDetailedErr(raw)
+	return m, raw, n, err
 }
 
 // WriteMsgToTCP packs and writes m to c in RFC 1035 format.
@@ -114,7 +131,7 @@ func WriteMsgToUDP(c io.Writer, m *dns.Msg) (int, error) {
 	return c.Write(b)
 }
 
-func ReadMsgFromUDP(c io.Reader, bufSize int) (*dns.Msg, int, error) {
+func ReadMsgFromUDP(c io.Reader, bufSize int) (*dns.Msg, []byte, int, error) {
 	if bufSize < dns.MinMsgSize {
 		bufSize = dns.MinMsgSize
 	}
@@ -124,11 +141,14 @@ func ReadMsgFromUDP(c io.Reader, bufSize int) (*dns.Msg, int, error) {
 	b := buf.Bytes()
 	n, err := c.Read(b)
 	if err != nil {
-		return nil, n, err
+		return nil, nil, n, err
 	}
 
-	m, err := unpackMsgWithDetailedErr(b[:n])
-	return m, n, err
+	raw := make([]byte, n)
+	copy(raw, b[:n])
+
+	m, err := unpackMsgWithDetailedErr(raw)
+	return m, raw, n, err
 }
 
 func unpackMsgWithDetailedErr(b []byte) (*dns.Msg, error) {

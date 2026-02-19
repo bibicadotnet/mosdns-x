@@ -23,13 +23,7 @@ type Collector struct {
 	*coremain.BP
 	fileName string
 	seen     sync.Map    // Optimal for read-heavy workloads
-	ch       chan string // Async buffer
-}
-
-func cleanDomain(d string) string {
-	d = strings.ToLower(strings.TrimSpace(d))
-	d = strings.TrimSuffix(d, ".")
-	return d
+	ch       chan string // Async buffer for batch file writing
 }
 
 func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
@@ -37,22 +31,24 @@ func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
 	c := &Collector{
 		BP:       bp,
 		fileName: a.FileName,
-		ch:       make(chan string, 4096), // Larger buffer for bursts
+		ch:       make(chan string, 4096), // Buffer to absorb traffic bursts
 	}
 
-	// 1. Initial Load
+	// Initial Load: Normalize existing file data (one-time boot cost)
 	f, err := os.Open(c.fileName)
 	if err == nil {
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
-			if d := cleanDomain(scanner.Text()); d != "" {
+			// Thorough cleaning for file data to ensure consistency across reloads
+			d := strings.ToLower(strings.Trim(scanner.Text(), ". \t\n\r"))
+			if d != "" {
 				c.seen.Store(d, struct{}{})
 			}
 		}
 		f.Close()
 	}
 
-	// 2. Optimized Async Writer with Batch Flush
+	// Background worker for non-blocking disk I/O
 	go c.asyncWriter()
 
 	return c, nil
@@ -65,10 +61,7 @@ func (c *Collector) asyncWriter() {
 	}
 	defer f.Close()
 
-	// Use bufio to reduce syscalls (Issue #2)
 	w := bufio.NewWriterSize(f, 64*1024)
-	
-	// Timer for periodic flush to ensure data is on disk even with low traffic
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -81,9 +74,6 @@ func (c *Collector) asyncWriter() {
 			}
 			w.WriteString(domain)
 			w.WriteByte('\n')
-			
-			// Auto-flush if buffer is getting full (handled by bufio internally)
-			// or manual flush per batch if needed.
 		case <-ticker.C:
 			w.Flush()
 		}
@@ -91,26 +81,21 @@ func (c *Collector) asyncWriter() {
 }
 
 func (c *Collector) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
-	q := qCtx.Q()
-	if q == nil || len(q.Question) == 0 {
-		return executable_seq.ExecChainNode(ctx, qCtx, next)
-	}
+	// Relying on Gatekeeper (misc_optm) for structure validation and lowercasing.
+	raw := qCtx.Q().Question[0].Name
 
-	domain := cleanDomain(q.Question[0].Name)
-	if domain == "" {
-		return executable_seq.ExecChainNode(ctx, qCtx, next)
-	}
+	// MINIMAL-ALLOCATION PATH:
+	// TrimSuffix is significantly cheaper than ToLower as it only slices the string.
+	// Since misc_optm already lowercased the domain, we avoid redundant heap allocations.
+	cleaned := strings.TrimSuffix(raw, ".")
 
-	// FAST PATH: sync.Map.Load is lock-free and avoids cache-line contention
-	if _, exists := c.seen.Load(domain); !exists {
-		// SLOW PATH: Domain is new
-		if _, loaded := c.seen.LoadOrStore(domain, struct{}{}); !loaded {
-			// Non-blocking send to async writer
-			select {
-			case c.ch <- domain:
-			default:
-				// Buffer full: drop logging to protect DNS performance
-			}
+	// ATOMIC LOOKUP:
+	// LoadOrStore handles check-and-set in a single atomic-like operation.
+	if _, loaded := c.seen.LoadOrStore(cleaned, struct{}{}); !loaded {
+		select {
+		case c.ch <- cleaned:
+		default:
+			// Buffer full: drop to ensure zero impact on DNS response latency
 		}
 	}
 

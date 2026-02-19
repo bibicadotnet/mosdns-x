@@ -73,10 +73,9 @@ type Context struct {
 	id            uint32
 	reqMeta       *RequestMeta
 
-	r           *dns.Msg
-	responseGen uint64 // Tăng tiến mỗi khi có response mới (từ cache hoặc upstream)
-	cachedGen   uint64 // Lưu version của response đã được ghi vào cache thành công
-	marks       map[uint]struct{}
+	r     *dns.Msg
+	rawR  []byte // wire format response (e.g., from cache)
+	marks map[uint]struct{}
 }
 
 var (
@@ -104,6 +103,7 @@ func NewContext(q *dns.Msg, meta *RequestMeta) *Context {
 }
 
 // String returns a short summary of its query.
+// Optimized: Trust the gatekeeper (_misc_optm). len(q.Question) is guaranteed to be 1.
 func (ctx *Context) String() string {
 	q := ctx.q.Question[0]
 	return fmt.Sprintf("%s %s %s %d %d",
@@ -121,6 +121,7 @@ func (ctx *Context) Q() *dns.Msg {
 }
 
 // OriginalQuery returns the copied original query msg.
+// Optimized: q.Copy() only happens when this is called (Lazy Init).
 func (ctx *Context) OriginalQuery() *dns.Msg {
 	if ctx.originalQuery == nil {
 		ctx.originalQuery = ctx.q.Copy()
@@ -134,29 +135,37 @@ func (ctx *Context) ReqMeta() *RequestMeta {
 }
 
 // R returns the response.
+// If ctx.r is nil but ctx.rawR is not, it performs an on-demand Unpack and clears rawR.
 func (ctx *Context) R() *dns.Msg {
-	return ctx.r
+	if ctx.r != nil {
+		return ctx.r
+	}
+	if len(ctx.rawR) > 0 {
+		m := new(dns.Msg)
+		if err := m.Unpack(ctx.rawR); err == nil {
+			ctx.r = m
+			ctx.rawR = nil // Clear rawR to ensure consistency if r is modified.
+			return m
+		}
+	}
+	return nil
 }
 
-// SetResponse stores the response r to the context and increments generation.
+// SetResponse stores the response r to the context and clears rawR.
 func (ctx *Context) SetResponse(r *dns.Msg) {
 	ctx.r = r
-	ctx.responseGen++ // Đánh dấu một "thế hệ" response mới
+	ctx.rawR = nil
 }
 
-// ResponseGen returns the current response generation.
-func (ctx *Context) ResponseGen() uint64 {
-	return ctx.responseGen
+// RawR returns the raw response.
+func (ctx *Context) RawR() []byte {
+	return ctx.rawR
 }
 
-// MarkAsCached records that the current response generation has been cached.
-func (ctx *Context) MarkAsCached() {
-	ctx.cachedGen = ctx.responseGen
-}
-
-// IsAlreadyCached reports whether the current response generation is already cached.
-func (ctx *Context) IsAlreadyCached() bool {
-	return ctx.r != nil && ctx.cachedGen == ctx.responseGen
+// SetRawResponse stores the raw response b to the context and clears r.
+func (ctx *Context) SetRawResponse(b []byte) {
+	ctx.rawR = b
+	ctx.r = nil
 }
 
 // Id returns the Context id.
@@ -182,7 +191,6 @@ func (ctx *Context) Copy() *Context {
 }
 
 // ShallowCopyForBackground creates a lightweight copy of this Context.
-// ShallowCopyForBackground creates a lightweight copy of this Context for lazy updates.
 func (ctx *Context) ShallowCopyForBackground() *Context {
 	return &Context{
 		startTime:     ctx.startTime,
@@ -190,8 +198,6 @@ func (ctx *Context) ShallowCopyForBackground() *Context {
 		originalQuery: ctx.originalQuery,
 		reqMeta:       ctx.reqMeta,
 		id:            ctx.id,
-		// responseGen và cachedGen mặc định về 0.
-		// Luồng lazy sẽ tự quản lý versioning của riêng nó.
 	}
 }
 
@@ -202,11 +208,13 @@ func (ctx *Context) CopyTo(d *Context) *Context {
 	d.originalQuery = ctx.originalQuery
 	d.reqMeta = ctx.reqMeta
 	d.id = ctx.id
-	d.responseGen = ctx.responseGen
-	d.cachedGen = ctx.cachedGen
 
 	if r := ctx.r; r != nil {
 		d.r = r.Copy()
+	}
+	if ctx.rawR != nil {
+		d.rawR = make([]byte, len(ctx.rawR))
+		copy(d.rawR, ctx.rawR)
 	}
 	for m := range ctx.marks {
 		d.AddMark(m)

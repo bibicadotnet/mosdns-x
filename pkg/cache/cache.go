@@ -21,7 +21,6 @@ package cache
 
 import (
 	"io"
-	"time"
 )
 
 // Backend represents a cache backend.
@@ -33,11 +32,11 @@ import (
 type Backend interface {
 	// Get retrieves v from Backend. The returned v may be the original value. The caller should
 	// not modify it.
-	Get(key string) (v []byte, storedTime, expirationTime time.Time)
+	Get(key uint64) (v []byte, storedTime, expirationTime int64)
 
 	// Store stores a copy of v into Backend. v cannot be nil.
 	// If expirationTime is already passed, Store is a noop.
-	Store(key string, v []byte, storedTime, expirationTime time.Time)
+	Store(key uint64, v []byte, storedTime, expirationTime int64)
 
 	Len() int
 

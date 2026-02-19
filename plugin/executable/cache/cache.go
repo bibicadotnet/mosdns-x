@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"time"
 
@@ -25,18 +26,6 @@ import (
 const (
 	PluginType = "cache"
 )
-
-// Context helpers cho luồng cập nhật lazy ngầm.
-type lazyBypassKey struct{}
-
-func setLazyBypass(ctx context.Context) context.Context {
-	return context.WithValue(ctx, lazyBypassKey{}, true)
-}
-
-func isLazyBypass(ctx context.Context) bool {
-	v, _ := ctx.Value(lazyBypassKey{}).(bool)
-	return v
-}
 
 func init() {
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(Args) })
@@ -69,10 +58,11 @@ type cachePlugin struct {
 	*coremain.BP
 	args *Args
 
-	// Các trường được tính toán trước để tối ưu hiệu suất hot-path
-	lazyEnabled  bool
-	lazyWindow   time.Duration
-	lazyReplyTTL uint32
+	// Pre-computed fields for hot path performance
+	lazyEnabled   bool
+	lazyWindow    time.Duration
+	lazyWindowSec int64
+	lazyReplyTTL  uint32
 
 	whenHit      executable_seq.Executable
 	backend      cache.Backend
@@ -136,15 +126,16 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 		}
 	}
 
-	p_inst := &cachePlugin{
+	p := &cachePlugin{
 		BP:      bp,
 		args:    args,
 		backend: c,
 		whenHit: whenHit,
 
-		lazyEnabled:  args.LazyCacheTTL > 0,
-		lazyWindow:   time.Duration(args.LazyCacheTTL) * time.Second,
-		lazyReplyTTL: uint32(args.LazyCacheReplyTTL),
+		lazyEnabled:   args.LazyCacheTTL > 0,
+		lazyWindow:    time.Duration(args.LazyCacheTTL) * time.Second,
+		lazyWindowSec: int64(args.LazyCacheTTL),
+		lazyReplyTTL:  uint32(args.LazyCacheReplyTTL),
 
 		queryTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "query_total",
@@ -165,172 +156,188 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 			return float64(c.Len())
 		}),
 	}
-	bp.GetMetricsReg().MustRegister(p_inst.queryTotal, p_inst.hitTotal, p_inst.lazyHitTotal, p_inst.size)
-	return p_inst, nil
+	bp.GetMetricsReg().MustRegister(p.queryTotal, p.hitTotal, p.lazyHitTotal, p.size)
+	return p, nil
 }
 
 func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	c.queryTotal.Inc()
 	q := qCtx.Q()
 
-	msgKey, err := c.getMsgKey(q)
+	nowUnix := time.Now().Unix()
+	msgKey := dnsutils.GetMsgHash(q, 0)
+	cachedResp, rawR, lazyHit, err := c.lookupCache(msgKey, nowUnix)
 	if err != nil {
-		c.L().Error("get msg key", qCtx.InfoField(), zap.Error(err))
-	}
-	if len(msgKey) == 0 {
-		return executable_seq.ExecChainNode(ctx, qCtx, next)
+		c.L().Error("lookup cache", qCtx.InfoField(), zap.Error(err))
 	}
 
-	// 1. LOOKUP PATH: Bỏ qua lookup nếu đang trong luồng update ngầm (lazy bypass)
-	if !isLazyBypass(ctx) {
-		cachedResp, lazyHit, err := c.lookupCache(msgKey)
-		if err != nil {
-			c.L().Error("lookup cache", qCtx.InfoField(), zap.Error(err))
+	if cachedResp != nil || rawR != nil {
+		if lazyHit {
+			c.lazyHitTotal.Inc()
+			c.doLazyUpdate(msgKey, qCtx, next)
 		}
-
-		if cachedResp != nil {
-			if lazyHit {
-				c.lazyHitTotal.Inc()
-				c.doLazyUpdate(msgKey, qCtx, next)
-			}
-
-			c.hitTotal.Inc()
+		c.hitTotal.Inc()
+		if rawR != nil {
+			// Patch ID in the raw buffer
+			binary.BigEndian.PutUint16(rawR[0:2], q.Id)
+			qCtx.SetRawResponse(rawR)
+		} else {
 			cachedResp.Id = q.Id
-
-			// Log Warn để xác nhận HIT từ Phase 0
-			c.L().Warn(
-				"cache hit",
-				qCtx.InfoField(),
-				zap.String("cache_tag", c.Tag()),
-				zap.String("hit_from", "phase0"),
-				zap.Bool("lazy", lazyHit),
-			)
-
 			qCtx.SetResponse(cachedResp)
-			// Quan trọng: Đánh dấu generation hiện tại đã được cache để tránh store đè ở phase sau
-			qCtx.MarkAsCached()
-
-			if c.whenHit != nil {
-				return c.whenHit.Exec(ctx, qCtx, nil)
-			}
-			return nil
 		}
+
+		if c.L().Core().Enabled(zap.DebugLevel) {
+			c.L().Debug("cache hit", qCtx.InfoField(), zap.Int64("now", nowUnix))
+		}
+		if c.whenHit != nil {
+			return c.whenHit.Exec(ctx, qCtx, nil)
+		}
+		return nil
 	}
 
-	// 2. MISS/BYPASS PATH: Thực thi các phase tiếp theo trong pipeline
-	c.L().Debug("cache miss", qCtx.InfoField(), zap.String("tag", c.Tag()))
+	if c.L().Core().Enabled(zap.DebugLevel) {
+		c.L().Debug("cache miss", qCtx.InfoField(), zap.Int64("now", nowUnix))
+	}
 	err = executable_seq.ExecChainNode(ctx, qCtx, next)
-
-	// 3. STORE PATH: 
-	// Sử dụng logic Response Generation: Chỉ store nếu generation của response hiện tại chưa được cache.
-	// Điều này cho phép Phase 5 store response mới ngay cả khi Phase 4 đã store response cũ.
 	r := qCtx.R()
 	if r != nil {
-		if !qCtx.IsAlreadyCached() {
-			if err := c.tryStoreMsg(msgKey, r); err != nil {
-				c.L().Error("cache store", qCtx.InfoField(), zap.Error(err))
-			} else {
-				qCtx.MarkAsCached()
-				c.L().Debug("stored", qCtx.InfoField(), zap.String("tag", c.Tag()), zap.Uint64("gen", qCtx.ResponseGen()))
-			}
-		} else {
-			c.L().Debug("skipped", qCtx.InfoField(), zap.String("tag", c.Tag()), zap.Uint64("gen", qCtx.ResponseGen()))
+		if err := c.tryStoreMsg(msgKey, r, nowUnix); err != nil {
+			c.L().Error("cache store", qCtx.InfoField(), zap.Error(err))
 		}
 	}
 	return err
 }
 
-func (c *cachePlugin) getMsgKey(q *dns.Msg) (string, error) {
-	// Trạng thái chuẩn hóa của Key phụ thuộc vào các plugin đặt trước cache (như ecs_handler hoặc edns0_filter)
-	return dnsutils.GetMsgKey(q, 0)
-}
-
-func (c *cachePlugin) lookupCache(msgKey string) (r *dns.Msg, lazyHit bool, err error) {
-	v, storedTime, backendExpireAt := c.backend.Get(msgKey)
+func (c *cachePlugin) lookupCache(msgKey uint64, nowUnix int64) (r *dns.Msg, rawR []byte, lazyHit bool, err error) {
+	v, storedTimeUnix, backendExpireAtUnix := c.backend.Get(msgKey)
 	if v == nil {
-		return nil, false, nil
+		return nil, nil, false, nil
 	}
 
 	if c.args.CompressResp {
 		decodeLen, err := snappy.DecodedLen(v)
 		if err != nil {
-			return nil, false, fmt.Errorf("snappy decode len err: %w", err)
+			return nil, nil, false, fmt.Errorf("snappy decode len err: %w", err)
 		}
 		if decodeLen > dns.MaxMsgSize {
-			return nil, false, fmt.Errorf("invalid snappy data, data len: %d", decodeLen)
+			return nil, nil, false, fmt.Errorf("invalid snappy data, data len: %d", decodeLen)
 		}
 		decompressBuf := pool.GetBuf(decodeLen)
 		defer decompressBuf.Release()
 		v, err = snappy.Decode(decompressBuf.Bytes(), v)
 		if err != nil {
-			return nil, false, fmt.Errorf("snappy decode err: %w", err)
+			return nil, nil, false, fmt.Errorf("snappy decode err: %w", err)
 		}
 	}
 
-	r = new(dns.Msg)
-	if err := r.Unpack(v); err != nil {
-		return nil, false, fmt.Errorf("failed to unpack cached data, %w", err)
+	// Internal format: [OffsetCount (1)] [Offsets (OffsetCount * 2)] [PackedDNSMsg]
+	if len(v) < 1 {
+		return nil, nil, false, fmt.Errorf("cache data too short")
 	}
+	offsetCount := int(v[0])
+	offEnd := 1 + offsetCount*2
+	if len(v) < offEnd {
+		return nil, nil, false, fmt.Errorf("cache data corrupted")
+	}
+	offsets := make([]uint16, offsetCount)
+	for i := 0; i < offsetCount; i++ {
+		offsets[i] = binary.BigEndian.Uint16(v[1+i*2 : 3+i*2])
+	}
+	packedMsg := v[offEnd:]
 
-	now := time.Now()
-	dnsExpireAt := backendExpireAt.Add(-c.lazyWindow)
+	// Logic to divide cache status into 3 zones: Fresh, Stale (Lazy), and Expired.
+	dnsExpireAtUnix := backendExpireAtUnix - c.lazyWindowSec
 
-	if now.Before(dnsExpireAt) {
-		if elapsed := now.Unix() - storedTime.Unix(); elapsed > 0 {
-			dnsutils.SubtractTTL(r, uint32(elapsed))
+	if nowUnix < dnsExpireAtUnix {
+		// Zone 1: Fresh.
+		elapsed := uint32(0)
+		if e := nowUnix - storedTimeUnix; e > 0 {
+			elapsed = uint32(e)
 		}
-		return r, false, nil
+		// Return RawResponse with binary patching
+		// We make a copy to return to the caller.
+		rawR = make([]byte, len(packedMsg))
+		copy(rawR, packedMsg)
+		dnsutils.PatchTTLAndID(rawR, 0, offsets, elapsed)
+		return nil, rawR, false, nil
 	}
 
-	if c.lazyEnabled && now.Before(backendExpireAt) {
+	if c.lazyEnabled && nowUnix < backendExpireAtUnix {
+		// Zone 2: Stale (Lazy hit).
+		// For lazy hits, we usually want to return a dns.Msg because SubtractTTL/SetTTL logic is already there.
+		// But we can also use RawR. Let's use RawR for consistency.
+		rawR = make([]byte, len(packedMsg))
+		copy(rawR, packedMsg)
+		// We can't easily calculate the delta to reach lazyReplyTTL without unpacking,
+		// but we can just set it to a fixed value in the patcher if we add a "SetTTL" mode.
+		// For now, let's unpack lazy hits since they are rare compared to fresh hits.
+		r = new(dns.Msg)
+		if err := r.Unpack(packedMsg); err != nil {
+			return nil, nil, false, fmt.Errorf("failed to unpack cached data, %w", err)
+		}
 		dnsutils.SetTTL(r, c.lazyReplyTTL)
-		return r, true, nil
+		return r, nil, true, nil
 	}
 
-	return nil, false, nil
+	return nil, nil, false, nil
 }
 
-func (c *cachePlugin) doLazyUpdate(msgKey string, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
+func (c *cachePlugin) doLazyUpdate(msgKey uint64, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) {
 	lazyQCtx := qCtx.ShallowCopyForBackground()
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], msgKey)
+	strKey := string(b[:])
 	lazyUpdateFunc := func() (interface{}, error) {
-		c.L().Debug("start lazy cache update", lazyQCtx.InfoField())
-		defer c.lazyUpdateSF.Forget(msgKey)
+		if c.L().Core().Enabled(zap.DebugLevel) {
+			c.L().Debug("start lazy cache update", lazyQCtx.InfoField())
+		}
+		defer c.lazyUpdateSF.Forget(strKey)
 		lazyCtx, cancel := context.WithTimeout(context.Background(), defaultLazyUpdateTimeout)
 		defer cancel()
-
-		lazyCtx = setLazyBypass(lazyCtx)
 
 		err := executable_seq.ExecChainNode(lazyCtx, lazyQCtx, next)
 		if err != nil {
 			c.L().Warn("failed to update lazy cache", lazyQCtx.InfoField(), zap.Error(err))
 		}
 
-		// Self-healing trong luồng ngầm cũng sử dụng logic IsAlreadyCached
 		r := lazyQCtx.R()
-		if r != nil && !lazyQCtx.IsAlreadyCached() {
-			if err := c.tryStoreMsg(msgKey, r); err != nil {
+		if r != nil {
+			if err := c.tryStoreMsg(msgKey, r, time.Now().Unix()); err != nil {
 				c.L().Error("cache store", lazyQCtx.InfoField(), zap.Error(err))
-			} else {
-				lazyQCtx.MarkAsCached()
 			}
 		}
-		c.L().Debug("lazy cache updated", lazyQCtx.InfoField())
+		if c.L().Core().Enabled(zap.DebugLevel) {
+			c.L().Debug("lazy cache updated", lazyQCtx.InfoField())
+		}
 		return nil, nil
 	}
-	c.lazyUpdateSF.DoChan(msgKey, lazyUpdateFunc)
+	c.lazyUpdateSF.DoChan(strKey, lazyUpdateFunc)
 }
 
-func (c *cachePlugin) tryStoreMsg(key string, r *dns.Msg) error {
+func (c *cachePlugin) tryStoreMsg(key uint64, r *dns.Msg, nowUnix int64) error {
 	if (r.Rcode != dns.RcodeSuccess && r.Rcode != dns.RcodeNameError) || r.Truncated {
 		return nil
 	}
 
-	v, err := r.Pack()
+	packedMsg, err := r.Pack()
 	if err != nil {
 		return fmt.Errorf("failed to pack response msg, %w", err)
 	}
 
-	now := time.Now()
+	// 1. Get TTL offsets for wire-level patching on hit
+	offsets, err := dnsutils.GetTTLOffsets(packedMsg)
+	if err != nil {
+		c.L().Debug("failed to get ttl offsets, falling back to full unpack on hit", zap.Error(err))
+	}
+
+	// 2. Internal format: [OffsetCount (1)] [Offsets (OffsetCount * 2)] [PackedDNSMsg]
+	internalVal := make([]byte, 1+len(offsets)*2+len(packedMsg))
+	internalVal[0] = byte(len(offsets))
+	for i, off := range offsets {
+		binary.BigEndian.PutUint16(internalVal[1+i*2:3+i*2], off)
+	}
+	copy(internalVal[1+len(offsets)*2:], packedMsg)
+
 	var msgTTL time.Duration
 	if len(r.Answer) == 0 {
 		msgTTL = defaultEmptyAnswerTTL
@@ -342,12 +349,14 @@ func (c *cachePlugin) tryStoreMsg(key string, r *dns.Msg) error {
 		return nil
 	}
 
-	expirationTime := now.Add(msgTTL + c.lazyWindow)
+	// Backend expiration = DNS TTL + Pre-computed Lazy Window.
+	expirationTimeUnix := nowUnix + int64(msgTTL/time.Second) + c.lazyWindowSec
 
+	v := internalVal
 	if c.args.CompressResp {
-		v = snappy.Encode(nil, v)
+		v = snappy.Encode(nil, internalVal)
 	}
-	c.backend.Store(key, v, now, expirationTime)
+	c.backend.Store(key, v, nowUnix, expirationTimeUnix)
 	return nil
 }
 

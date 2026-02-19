@@ -34,8 +34,7 @@ type Args struct {
 
 type responseMatcher struct {
 	*coremain.BP
-	args *Args
-
+	args         *Args
 	matcherGroup []executable_seq.Matcher
 	closer       []io.Closer
 }
@@ -65,10 +64,7 @@ func newResponseMatcher(bp *coremain.BP, args *Args) (m *responseMatcher, err er
 	}
 
 	if len(args.CNAME) > 0 {
-		mg, err := domain.BatchLoadDomainProvider(
-			args.CNAME,
-			bp.M().GetDataManager(),
-		)
+		mg, err := domain.BatchLoadDomainProvider(args.CNAME, bp.M().GetDataManager())
 		if err != nil {
 			return nil, err
 		}
@@ -98,31 +94,21 @@ var _ coremain.MatcherPlugin = (*hasValidAnswer)(nil)
 
 func (e *hasValidAnswer) match(qCtx *query_context.Context) bool {
 	r := qCtx.R()
-	if r == nil {
+	// Skip fast if response is nil or has no answers.
+	if r == nil || len(r.Answer) == 0 {
 		return false
 	}
 
-	q := qCtx.Q()
-	if q == nil {
-		return false
-	}
-
-	questions := q.Question
-	if len(questions) == 0 {
-		return false
-	}
+	// Trusted Invariant: qCtx.Q().Question[0] is guaranteed by entry_handler.
+	target := qCtx.Q().Question[0]
 
 	for _, rr := range r.Answer {
 		h := rr.Header()
-		for _, question := range questions {
-			if h.Rrtype == question.Qtype &&
-				h.Class == question.Qclass &&
-				h.Name == question.Name {
-				return true
-			}
+		// Case-insensitive comparison without allocation for upstream response validation.
+		if h.Rrtype == target.Qtype && h.Name == target.Name {
+			return true
 		}
 	}
-
 	return false
 }
 

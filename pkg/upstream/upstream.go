@@ -51,8 +51,9 @@ import (
 // Upstream represents a DNS upstream.
 type Upstream interface {
 	// ExchangeContext exchanges query message m to the upstream, and returns
-	// response. It MUST NOT keep or modify m.
-	ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.Msg, error)
+	// response msg and its raw wire format (if available).
+	// It MUST NOT keep or modify m.
+	ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.Msg, []byte, error)
 
 	io.Closer
 }
@@ -154,7 +155,7 @@ func NewUpstream(addr string, opt *Opt) (Upstream, error) {
 				return d.DialContext(ctx, "tcp", dialAddr)
 			},
 			WriteFunc: dnsutils.WriteMsgToTCP,
-			ReadFunc:  dnsutils.ReadMsgFromTCP,
+			ReadFunc:  dnsutils.ReadLazyMsgFromTCP,
 		}
 		tt, err := transport.NewTransport(tto)
 		if err != nil {
@@ -171,7 +172,7 @@ func NewUpstream(addr string, opt *Opt) (Upstream, error) {
 				return d.DialContext(ctx, "tcp", dialAddr)
 			},
 			WriteFunc:      dnsutils.WriteMsgToTCP,
-			ReadFunc:       dnsutils.ReadMsgFromTCP,
+			ReadFunc:       dnsutils.ReadLazyMsgFromTCP,
 			IdleTimeout:    opt.IdleTimeout,
 			EnablePipeline: opt.EnablePipeline,
 			MaxConns:       opt.MaxConns,
@@ -195,7 +196,7 @@ func NewUpstream(addr string, opt *Opt) (Upstream, error) {
 				return tlsConn, nil
 			},
 			WriteFunc:      dnsutils.WriteMsgToTCP,
-			ReadFunc:       dnsutils.ReadMsgFromTCP,
+			ReadFunc:       dnsutils.ReadLazyMsgFromTCP,
 			IdleTimeout:    opt.IdleTimeout,
 			EnablePipeline: opt.EnablePipeline,
 			MaxConns:       opt.MaxConns,
@@ -366,15 +367,15 @@ type udpWithFallback struct {
 	t *transport.Transport
 }
 
-func (u *udpWithFallback) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
-	m, err := u.u.ExchangeContext(ctx, q)
+func (u *udpWithFallback) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, []byte, error) {
+	m, raw, err := u.u.ExchangeContext(ctx, q)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if m.Truncated {
 		return u.t.ExchangeContext(ctx, q)
 	}
-	return m, nil
+	return m, raw, nil
 }
 
 func (u *udpWithFallback) Close() error {

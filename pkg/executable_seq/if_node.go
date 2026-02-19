@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package executable_seq
 
 import (
@@ -161,36 +142,47 @@ func (r exprResult) String() string {
 }
 
 type exprParamsPlaceHolder struct {
-	f   map[string]func() (bool, error)
-	res map[string]exprResult
+	ctx      context.Context
+	qCtx     *query_context.Context
+	matchers map[string]Matcher
+	res      map[string]exprResult
+}
+
+// Reset clears internal maps to prevent data leakage between requests when reused from sync.Pool.
+func (e *exprParamsPlaceHolder) Reset() {
+	e.ctx = nil
+	e.qCtx = nil
+	e.matchers = nil
+	for k := range e.res {
+		delete(e.res, k)
+	}
 }
 
 func newExprParamsPlaceHolder() *exprParamsPlaceHolder {
 	return &exprParamsPlaceHolder{
-		f:   make(map[string]func() (bool, error)),
 		res: make(map[string]exprResult),
 	}
 }
 
 func (e *exprParamsPlaceHolder) Get(name string) (interface{}, error) {
-	f, ok := e.f[name]
+	// Optimization: Direct lookup and execution without closure allocation
+	m, ok := e.matchers[name]
 	if !ok {
-		return nil, fmt.Errorf("cannot find var %s", name)
+		return nil, fmt.Errorf("cannot find matcher %s", name)
 	}
-	res, err := f()
+
+	// Exec matcher
+	res, err := m.Match(e.ctx, e.qCtx)
 	if err != nil {
 		return nil, err
 	}
-	if res == true {
+
+	if res {
 		e.res[name] = exprResultTrue
 	} else {
 		e.res[name] = exprResultFalse
 	}
 	return res, nil
-}
-
-func (e *exprParamsPlaceHolder) setCall(name string, f func() (bool, error)) {
-	e.f[name] = f
 }
 
 // A helper func for better log.
@@ -208,21 +200,28 @@ func (m *conditionMatcher) Match(ctx context.Context, qCtx *query_context.Contex
 	paramsPH, ok := m.paramsPHPool.Get().(*exprParamsPlaceHolder)
 	if !ok {
 		paramsPH = newExprParamsPlaceHolder()
+	} else {
+		// Fix: reset maps to avoid side effects from previous requests
+		paramsPH.Reset()
 	}
 	defer m.paramsPHPool.Put(paramsPH)
 
-	for tag, matcher := range m.matchers {
-		matcher := matcher
-		f := func() (bool, error) {
-			return matcher.Match(ctx, qCtx)
-		}
-		paramsPH.setCall(tag, f)
-	}
+	// Optimization: Pass context and matchers directly to the placeholder
+	paramsPH.ctx = ctx
+	paramsPH.qCtx = qCtx
+	paramsPH.matchers = m.matchers
+
 	out, err := m.expr.Eval(paramsPH)
 	if err != nil {
 		return false, err
 	}
-	res := out.(bool)
+
+	// Fix: safe type assertion with comma-ok to prevent panic
+	res, ok := out.(bool)
+	if !ok {
+		return false, fmt.Errorf("condition expression '%s' returned non-boolean: %v", m.expr.String(), out)
+	}
+
 	m.lg.Debug(
 		"condition matcher result",
 		paramsPH.makeResultZapFields(qCtx.InfoField(), res)...,

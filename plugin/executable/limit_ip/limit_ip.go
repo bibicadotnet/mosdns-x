@@ -11,10 +11,20 @@ import (
 const PluginType = "limit_ip"
 
 func init() {
+	// Standard plugin registration for custom limits in YAML
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} {
 		return new(Args)
 	})
+
+	// Preset registration for quick access: _limit_2_ips
+	coremain.RegNewPersetPluginFunc("_limit_2_ips", func(bp *coremain.BP) (coremain.Plugin, error) {
+		return &limitIPPlugin{BP: bp, limit: 2}, nil
+	})
 }
+
+// CRITICAL: Explicitly assert that limitIPPlugin implements ExecutablePlugin.
+// Without this, Mosdns may register the plugin but never trigger the Exec function.
+var _ coremain.ExecutablePlugin = (*limitIPPlugin)(nil)
 
 type Args struct {
 	Limit int `yaml:"limit"`
@@ -28,7 +38,6 @@ type limitIPPlugin struct {
 func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
 	cfg := args.(*Args)
 	limit := cfg.Limit
-	// Default limit to 2 if not specified or invalid.
 	if limit <= 0 {
 		limit = 2
 	}
@@ -40,32 +49,28 @@ func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
 
 // Exec limits the number of IP records in the DNS answer.
 //
-// PIPELINE ORDER WARNING:
-// To maintain maximum performance (~1ns) and avoid logic errors (like truncating CNAME chains),
-// this plugin SHOULD be placed AFTER:
-// 1. '_no_cname' (CNAME flattening)
-// 2. IPv6/IPv4 filters (if any)
+// YAML CONFIGURATION WARNING:
+// In Mosdns, the response processing order is the REVERSE of the YAML order.
 //
-// This ensures the Answer section contains only pure IP records of the desired type.
-
+// To ensure logic correctness, place this ABOVE '_no_cname' in your YAML:
+// - _limit_2_ips  (TOP: Processes response LAST)
+// - _no_cname     (BOTTOM: Processes response FIRST)
 func (p *limitIPPlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
-	// 1. Upstream execution.
+	// 1. Forward execution to next nodes and wait for Upstream response
 	if err := executable_seq.ExecChainNode(ctx, qCtx, next); err != nil {
 		return err
 	}
 
 	r := qCtx.R()
 	// 2. Early Exit:
-	// If the response is nil or the number of IPs is already within the limit, exit immediately.
-	// This fast path (~1ns) handles 99% of traffic (e.g., Cloudflare/Google usually return 1-2 IPs).
+	// Handle nil responses or answers already within the limit (~1ns hot path).
 	if r == nil || len(r.Answer) <= p.limit {
 		return nil
 	}
 
 	// 3. In-place Truncation:
-	// Strictly preserve the original upstream order.
-	// This maximizes DNS cache consistency and maintains TCP/TLS session persistence 
-	// by ensuring the client consistently connects to the primary IP provided by the upstream.
+	// Safe to truncate now because _no_cname (below in YAML) has already
+	// flattened the response during the initial phase of the response stack.
 	r.Answer = r.Answer[:p.limit]
 
 	return nil

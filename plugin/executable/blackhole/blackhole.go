@@ -58,9 +58,9 @@ type blackHole struct {
 }
 
 type Args struct {
-	IPv4  []string `yaml:"ipv4"` // block by responding specific IP
+	IPv4  []string `yaml:"ipv4"`
 	IPv6  []string `yaml:"ipv6"`
-	RCode int      `yaml:"rcode"` // block by responding specific RCode
+	RCode int      `yaml:"rcode"`
 }
 
 func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
@@ -71,21 +71,15 @@ func newBlackHole(bp *coremain.BP, args *Args) (*blackHole, error) {
 	b := &blackHole{BP: bp, args: args}
 	for _, s := range args.IPv4 {
 		addr, err := netip.ParseAddr(s)
-		if err != nil {
-			return nil, fmt.Errorf("invalid ipv4 addr %s, %w", s, err)
-		}
-		if !addr.Is4() {
-			return nil, fmt.Errorf("invalid ipv4 addr %s", s)
+		if err != nil || !addr.Is4() {
+			return nil, fmt.Errorf("invalid ipv4 addr: %s", s)
 		}
 		b.ipv4 = append(b.ipv4, addr)
 	}
 	for _, s := range args.IPv6 {
 		addr, err := netip.ParseAddr(s)
-		if err != nil {
-			return nil, fmt.Errorf("invalid ipv6 addr %s, %w", s, err)
-		}
-		if !addr.Is6() {
-			return nil, fmt.Errorf("invalid ipv6 addr %s", s)
+		if err != nil || !addr.Is6() {
+			return nil, fmt.Errorf("invalid ipv6 addr: %s", s)
 		}
 		b.ipv6 = append(b.ipv6, addr)
 	}
@@ -94,26 +88,34 @@ func newBlackHole(bp *coremain.BP, args *Args) (*blackHole, error) {
 
 func (b *blackHole) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	b.exec(qCtx)
-	// For blackhole, we usually don't want to execute next nodes if a response is set,
-	// but keeping coremain logic to ensure pipeline consistency.
 	return executable_seq.ExecChainNode(ctx, qCtx, next)
 }
 
+// exec logic invariant:
+// 1. qCtx.Q() is validated by _misc_optm (non-nil, len(Question) == 1).
 func (b *blackHole) exec(qCtx *query_context.Context) {
 	q := qCtx.Q()
-	if q == nil || len(q.Question) != 1 {
+	question := q.Question[0]
+
+	// Optimization: Handle the most common case (RCode only) first to reduce branching.
+	if len(b.ipv4) == 0 && len(b.ipv6) == 0 {
+		if b.args.RCode >= 0 {
+			qCtx.SetResponse(dnsutils.GenEmptyReply(q, b.args.RCode))
+		} else {
+			qCtx.SetResponse(nil) // Drop
+		}
 		return
 	}
 
-	qName := q.Question[0].Name
-	qtype := q.Question[0].Qtype
+	qName := question.Name
+	qType := question.Qtype
 
 	switch {
-	case qtype == dns.TypeA && len(b.ipv4) > 0:
+	case qType == dns.TypeA && len(b.ipv4) > 0:
 		r := new(dns.Msg)
 		r.SetRcode(q, dns.RcodeSuccess)
 		r.RecursionAvailable = true
-		r.Answer = make([]dns.RR, 0, len(b.ipv4)) // Pre-allocate slice
+		r.Answer = make([]dns.RR, 0, len(b.ipv4))
 		for _, addr := range b.ipv4 {
 			r.Answer = append(r.Answer, &dns.A{
 				Hdr: dns.RR_Header{
@@ -127,11 +129,11 @@ func (b *blackHole) exec(qCtx *query_context.Context) {
 		}
 		qCtx.SetResponse(r)
 
-	case qtype == dns.TypeAAAA && len(b.ipv6) > 0:
+	case qType == dns.TypeAAAA && len(b.ipv6) > 0:
 		r := new(dns.Msg)
 		r.SetRcode(q, dns.RcodeSuccess)
 		r.RecursionAvailable = true
-		r.Answer = make([]dns.RR, 0, len(b.ipv6)) // Pre-allocate slice
+		r.Answer = make([]dns.RR, 0, len(b.ipv6))
 		for _, addr := range b.ipv6 {
 			r.Answer = append(r.Answer, &dns.AAAA{
 				Hdr: dns.RR_Header{
@@ -146,11 +148,9 @@ func (b *blackHole) exec(qCtx *query_context.Context) {
 		qCtx.SetResponse(r)
 
 	case b.args.RCode >= 0:
-		// Generate an empty reply with the specified RCode (e.g., NXDOMAIN, REFUSED)
 		qCtx.SetResponse(dnsutils.GenEmptyReply(q, b.args.RCode))
 
 	default:
-		// Drop response (Args.RCode < 0)
 		qCtx.SetResponse(nil)
 	}
 }

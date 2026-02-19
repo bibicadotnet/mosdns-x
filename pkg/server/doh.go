@@ -23,8 +23,8 @@ import (
 	"net/url"
 	"time"
 
-	"gitlab.com/go-extension/http"
 	H "github.com/pmkol/mosdns-x/pkg/server/http_handler"
+	"gitlab.com/go-extension/http"
 )
 
 const (

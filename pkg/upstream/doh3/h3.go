@@ -48,7 +48,12 @@ func NewUpstream(url *url.URL, transport *http3.Transport) *Upstream {
 	return &Upstream{url, transport}
 }
 
-func (u *Upstream) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+func (u *Upstream) ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.Msg, []byte, error) {
+	r, err := u.Exchange(ctx, m)
+	return r, nil, err
+}
+
+func (u *Upstream) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	q.Id = 0

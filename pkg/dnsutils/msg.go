@@ -3,6 +3,7 @@ package dnsutils
 import (
 	"strconv"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/miekg/dns"
 )
 
@@ -24,21 +25,47 @@ func GetMsgKey(m *dns.Msg, salt uint16) (string, error) {
 		}
 	}
 
-	// Optimized for performance: 2 small heap allocations (~20-64 bytes each).
-	// One for the 'buf' slice and one for the 'string' copy.
-	// This is cleaner and often faster than sync.Pool for small, short-lived keys.
-	buf := make([]byte, 0, size)
-	buf = append(buf, q.Name...)
-	buf = append(buf, byte(q.Qtype>>8), byte(q.Qtype))
-	buf = append(buf, byte(q.Qclass>>8), byte(q.Qclass))
+	// Optimized for performance: Use make with capacity to avoid re-allocations.
+	// For small, short-lived keys, direct allocation is often faster than sync.Pool.
+	b := make([]byte, 0, size)
+	b = append(b, q.Name...)
+	b = append(b, byte(q.Qtype>>8), byte(q.Qtype))
+	b = append(b, byte(q.Qclass>>8), byte(q.Qclass))
 
 	if ecs != nil {
-		buf = append(buf, byte(ecs.Family>>8), byte(ecs.Family))
-		buf = append(buf, ecs.SourceNetmask)
-		buf = append(buf, ecs.Address...)
+		b = append(b, byte(ecs.Family>>8), byte(ecs.Family))
+		b = append(b, ecs.SourceNetmask)
+		b = append(b, ecs.Address...)
 	}
 
-	return string(buf), nil
+	return string(b), nil
+}
+
+// GetMsgHash generates an 8-byte hash key for the message.
+// Pre-condition: Detailed validations (e.g., Question count, normalization)
+// are skipped here as they are strictly enforced by upstream pipeline plugins.
+func GetMsgHash(m *dns.Msg, salt uint16) uint64 {
+	q := m.Question[0]
+
+	var buf [512]byte
+	b := buf[:0]
+
+	b = append(b, q.Name...)
+	b = append(b, byte(q.Qtype>>8), byte(q.Qtype))
+	b = append(b, byte(q.Qclass>>8), byte(q.Qclass))
+	b = append(b, byte(salt>>8), byte(salt))
+
+	if len(m.Extra) > 0 {
+		if opt, ok := m.Extra[0].(*dns.OPT); ok && len(opt.Option) > 0 {
+			if ecs, ok := opt.Option[0].(*dns.EDNS0_SUBNET); ok {
+				b = append(b, byte(ecs.Family>>8), byte(ecs.Family))
+				b = append(b, ecs.SourceNetmask)
+				b = append(b, ecs.Address...)
+			}
+		}
+	}
+
+	return xxhash.Sum64(b)
 }
 
 // --- TTL Management ---

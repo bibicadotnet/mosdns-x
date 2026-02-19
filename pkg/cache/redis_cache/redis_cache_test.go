@@ -36,18 +36,18 @@ func Test_RedisValue(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			data := packRedisData(tt.storedTime, tt.expirationTime, tt.m)
+			data := packRedisData(tt.storedTime.Unix(), tt.expirationTime.Unix(), tt.m)
 			defer data.Release()
 
 			storedTime, expirationTime, m, err := unpackRedisValue(data.Bytes())
 			if err != nil {
 				t.Fatal(err)
 			}
-			if storedTime.Unix() != tt.storedTime.Unix() {
-				t.Fatalf("storedTime: want %v, got %v", tt.storedTime, storedTime)
+			if storedTime != tt.storedTime.Unix() {
+				t.Fatalf("storedTime: want %v, got %v", tt.storedTime.Unix(), storedTime)
 			}
-			if expirationTime.Unix() != tt.expirationTime.Unix() {
-				t.Fatalf("expirationTime: want %v, got %v", tt.expirationTime, expirationTime)
+			if expirationTime != tt.expirationTime.Unix() {
+				t.Fatalf("expirationTime: want %v, got %v", tt.expirationTime.Unix(), expirationTime)
 			}
 			if !reflect.DeepEqual(m, tt.m) {
 				t.Fatalf("m: want %v, got %v", tt.m, m)
