@@ -48,7 +48,6 @@ func RemoveEDNS0Option(opt *dns.OPT, option uint16) {
 			return
 		}
 	}
-	return
 }
 
 func GetEDNS0Option(opt *dns.OPT, option uint16) dns.EDNS0 {
