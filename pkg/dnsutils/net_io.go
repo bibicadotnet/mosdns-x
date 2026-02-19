@@ -72,6 +72,10 @@ func ReadLazyMsgFromTCP(c io.Reader) (*dns.Msg, []byte, int, error) {
 	}
 	defer b.Release()
 
+	if len(b.Bytes()) < 12 {
+		return nil, nil, n, ErrInvalidDNSMsg
+	}
+
 	raw := make([]byte, len(b.Bytes()))
 	copy(raw, b.Bytes())
 
@@ -142,6 +146,10 @@ func ReadMsgFromUDP(c io.Reader, bufSize int) (*dns.Msg, []byte, int, error) {
 	n, err := c.Read(b)
 	if err != nil {
 		return nil, nil, n, err
+	}
+
+	if n < 12 {
+		return nil, nil, n, ErrInvalidDNSMsg
 	}
 
 	raw := make([]byte, n)

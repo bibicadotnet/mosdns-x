@@ -166,7 +166,7 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 
 	nowUnix := time.Now().Unix()
 	msgKey := dnsutils.GetMsgHash(q, 0)
-	cachedResp, rawR, lazyHit, err := c.lookupCache(msgKey, nowUnix)
+	cachedResp, rawR, lazyHit, err := c.lookupCache(msgKey, nowUnix, q.Id)
 	if err != nil {
 		c.L().Error("lookup cache", qCtx.InfoField(), zap.Error(err))
 	}
@@ -178,8 +178,6 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 		}
 		c.hitTotal.Inc()
 		if rawR != nil {
-			// Patch ID in the raw buffer
-			binary.BigEndian.PutUint16(rawR[0:2], q.Id)
 			qCtx.SetRawResponse(rawR)
 		} else {
 			cachedResp.Id = q.Id
@@ -208,7 +206,7 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 	return err
 }
 
-func (c *cachePlugin) lookupCache(msgKey uint64, nowUnix int64) (r *dns.Msg, rawR []byte, lazyHit bool, err error) {
+func (c *cachePlugin) lookupCache(msgKey uint64, nowUnix int64, targetID uint16) (r *dns.Msg, rawR []byte, lazyHit bool, err error) {
 	v, storedTimeUnix, backendExpireAtUnix := c.backend.Get(msgKey)
 	if v == nil {
 		return nil, nil, false, nil
@@ -258,7 +256,7 @@ func (c *cachePlugin) lookupCache(msgKey uint64, nowUnix int64) (r *dns.Msg, raw
 		// We make a copy to return to the caller.
 		rawR = make([]byte, len(packedMsg))
 		copy(rawR, packedMsg)
-		dnsutils.PatchTTLAndID(rawR, 0, offsets, elapsed)
+		dnsutils.PatchTTLAndID(rawR, targetID, offsets, elapsed)
 		return nil, rawR, false, nil
 	}
 

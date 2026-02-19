@@ -87,8 +87,15 @@ func skipName(msg []byte, off int) (int, error) {
 			}
 			return off + 2, nil
 		}
+		if c&0xC0 != 0 { // Restricted label type (RFC 1682/1035)
+			return 0, ErrInvalidDNSMsg
+		}
 		// Label length
-		off += int(c) + 1
+		l := int(c)
+		if off+1+l > len(msg) {
+			return 0, ErrInvalidDNSMsg
+		}
+		off += l + 1
 	}
 }
 
