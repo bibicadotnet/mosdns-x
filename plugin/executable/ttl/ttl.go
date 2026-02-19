@@ -41,16 +41,16 @@ func Init(bp *coremain.BP, args interface{}) (coremain.Plugin, error) {
 
 func (t *ttlPlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	r := qCtx.R()
-
+	
 	// Fast Path: If no response or no TTL constraints, move to next plugin immediately.
 	if r == nil || (t.max == 0 && t.min == 0) {
 		return executable_seq.ExecChainNode(ctx, qCtx, next)
 	}
 
-	// SINGLE-PASS OPTIMIZATION:
-	// Instead of calling dnsutils helpers twice (which loops twice),
+	// SINGLE-PASS OPTIMIZATION: 
+	// Instead of calling dnsutils helpers twice (which loops twice), 
 	// we iterate through all RR sections in a single pass.
-
+	
 	// Helper to process a slice of RRs
 	processRRs := func(rrs []dns.RR) {
 		for _, rr := range rrs {

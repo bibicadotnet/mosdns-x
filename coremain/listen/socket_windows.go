@@ -20,10 +20,6 @@ func CreateListenConfig(uds bool) net.ListenConfig {
 					return
 				}
 				e = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 64*1024)
-				if e != nil {
-					return
-				}
-				e = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF, 64*1024)
 			})
 			if err != nil {
 				return err

@@ -98,7 +98,7 @@ func newPlugin(bp *coremain.BP, args *Args) (p *ecsPlugin, err error) {
 
 func (e *ecsPlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	upgraded, newECS := e.addECS(qCtx)
-
+	
 	err := executable_seq.ExecChainNode(ctx, qCtx, next)
 	if err != nil {
 		return err
@@ -213,7 +213,7 @@ func (n *noECS) Exec(ctx context.Context, qCtx *query_context.Context, next exec
 	}
 
 	err := executable_seq.ExecChainNode(ctx, qCtx, next)
-
+	
 	if r := qCtx.R(); r != nil {
 		dnsutils.RemoveMsgECS(r)
 	}

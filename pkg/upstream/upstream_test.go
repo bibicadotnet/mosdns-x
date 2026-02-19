@@ -173,7 +173,7 @@ func testUpstream(u Upstream) error {
 			q.Id = i
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			r, _, err := u.ExchangeContext(ctx, q)
+			r, err := u.ExchangeContext(ctx, q)
 			if err != nil {
 				logErr(err)
 				return

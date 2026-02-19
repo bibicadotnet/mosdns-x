@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -214,27 +213,15 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 		return
 	}
 
-	respMsg, rawResp, err := h.opts.DNSHandler.ServeDNS(req.Context(), m, meta)
+	r, err := h.opts.DNSHandler.ServeDNS(req.Context(), m, meta)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		h.warnErr(req, fmt.Errorf("dns handler error: %w", err))
 		return
 	}
 
-	if rawResp != nil {
-		w.Header().Set("Content-Type", "application/dns-message")
-		// For RawResp from cache, we already patched TTLs.
-		// We could calculate minimal TTL from rawResp if needed for Cache-Control,
-		// but since we bypass dns.Msg, we'll need offsets.
-		// For now, let's assume we don't set Cache-Control for RawResp or we set a default.
-		// Actually, we SHOULD set it.
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(rawResp)
-		return
-	}
-
 	// Use pool to pack response, reducing GC pressure
-	resBytes, buf, err := pool.PackBuffer(respMsg)
+	resBytes, buf, err := pool.PackBuffer(r)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		h.warnErr(req, fmt.Errorf("pack response failed: %w", err))
@@ -244,7 +231,7 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 
 	// 6. Finalize Response
 	w.Header().Set("Content-Type", "application/dns-message")
-	w.Header().Set("Cache-Control", "max-age="+strconv.FormatUint(uint64(dnsutils.GetMinimalTTL(respMsg)), 10))
+	w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", dnsutils.GetMinimalTTL(r)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resBytes)
 }

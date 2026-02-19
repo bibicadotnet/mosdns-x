@@ -5,7 +5,7 @@ import (
 	"sync"
 )
 
-// Limit pool to 12 bits (4KB).
+// Limit pool to 12 bits (4KB). 
 // Optimized for DNS workloads (UDP/DoH/DoT/DoQ).
 const maxDNSPoolBits = 12
 
@@ -44,7 +44,7 @@ func NewAllocator(maxPoolBitsLen int) *Allocator {
 	return alloc
 }
 
-// Get returns a *Buffer from the pool.
+// Get returns a *Buffer from the pool. 
 // Fallback to direct allocation (a == nil) if size exceeds maxPoolLen.
 func (alloc *Allocator) Get(size int) *Buffer {
 	if size < 0 {
@@ -53,7 +53,7 @@ func (alloc *Allocator) Get(size int) *Buffer {
 
 	if size > alloc.maxPoolLen {
 		return &Buffer{
-			a: nil,
+			a: nil, 
 			l: size,
 			b: make([]byte, size),
 		}
@@ -84,7 +84,7 @@ func (alloc *Allocator) Release(buf *Buffer) {
 
 	// Reset logical length to 0 before returning to pool.
 	// This maintains the invariant that a free buffer is an empty buffer.
-	buf.l = 0
+	buf.l = 0 
 	alloc.buffers[i].Put(buf)
 }
 

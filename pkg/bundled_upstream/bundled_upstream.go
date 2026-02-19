@@ -7,22 +7,20 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/miekg/dns"
 	"go.uber.org/zap"
 
-	"github.com/miekg/dns"
-	"github.com/pmkol/mosdns-x/pkg/dnsutils"
 	"github.com/pmkol/mosdns-x/pkg/query_context"
 )
 
 type Upstream interface {
-	ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, []byte, error)
+	Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 	Trusted() bool
 	Address() string
 }
 
 type parallelResult struct {
 	r    *dns.Msg
-	raw  []byte
 	err  error
 	from Upstream
 }
@@ -38,19 +36,19 @@ const (
 )
 
 // ExchangeParallel executes multiple DNS exchanges in parallel.
-func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstreams []Upstream, logger *zap.Logger) (*dns.Msg, []byte, error) {
+func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstreams []Upstream, logger *zap.Logger) (*dns.Msg, error) {
 	if logger == nil {
 		logger = nopLogger
 	}
 
 	t := len(upstreams)
 	if t == 0 {
-		return nil, nil, ErrAllFailed
+		return nil, ErrAllFailed
 	}
 
 	q := qCtx.Q()
 	if t == 1 {
-		return upstreams[0].ExchangeContext(ctx, q)
+		return upstreams[0].Exchange(ctx, q)
 	}
 
 	taskCtx, cancel := context.WithCancel(ctx)
@@ -65,9 +63,9 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r, raw, err := u.ExchangeContext(taskCtx, qCopy)
+			r, err := u.Exchange(taskCtx, qCopy)
 			select {
-			case c <- &parallelResult{r: r, raw: raw, err: err, from: u}:
+			case c <- &parallelResult{r: r, err: err, from: u}:
 			case <-taskCtx.Done():
 				return
 			}
@@ -81,7 +79,6 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 
 	var errMsgs []string
 	var bestFallbackRes *dns.Msg
-	var bestFallbackRaw []byte
 	var bestPrio = -1
 
 	for res := range c {
@@ -96,42 +93,27 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 			continue
 		}
 
-		// === Phase 2: Success Racing (Fast Path) ===
-		// Return immediately if any response has answer records.
-		var rcode int
-		var anCount uint16
-		if res.r != nil {
-			rcode = res.r.Rcode
-			anCount = uint16(len(res.r.Answer))
-		} else if len(res.raw) > 0 {
-			h, _ := dnsutils.GetHeaderInfo(res.raw)
-			rcode = h.Rcode
-			anCount = h.ANCount
+		if res.r == nil {
+			continue
 		}
 
-		if rcode == dns.RcodeSuccess && anCount > 0 {
+		// === Phase 2: Success Racing (Fast Path) ===
+		// Return immediately if any response has answer records.
+		if res.r.Rcode == dns.RcodeSuccess && len(res.r.Answer) > 0 {
 			cancel()
-			return res.r, res.raw, nil
+			return res.r, nil
 		}
 
 		// === Phase 3: Semantic Fallback Collection ===
 		// If no answer yet, track the best non-answer response.
-		newPrio := 1 // Default priority
-		if res.r != nil {
-			newPrio = getRcodePriority(res.r.Rcode)
-		} else if len(res.raw) > 0 {
-			h, _ := dnsutils.GetHeaderInfo(res.raw)
-			newPrio = getRcodePriority(h.Rcode)
-		}
-
-		if bestFallbackRaw == nil && bestFallbackRes == nil || newPrio > bestPrio {
+		newPrio := getResponsePriority(res.r)
+		if bestFallbackRes == nil || newPrio > bestPrio {
 			bestFallbackRes = res.r
-			bestFallbackRaw = res.raw
 			bestPrio = newPrio
 		}
 
 		// Log non-answer responses for debugging.
-		status := getRcodeStatus(res.r, res.raw)
+		status := getRcodeStatus(res.r)
 		logger.Debug("upstream returned non-answer response",
 			qCtx.InfoField(),
 			zap.String("addr", res.from.Address()),
@@ -140,13 +122,13 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 
 	// === Phase 4: Final Result Selection ===
 	// 1. Best semantic error (NXDOMAIN > NODATA > SERVFAIL)
-	if bestFallbackRes != nil || bestFallbackRaw != nil {
-		return bestFallbackRes, bestFallbackRaw, nil
+	if bestFallbackRes != nil {
+		return bestFallbackRes, nil
 	}
 
 	// 2. Parent context termination (Timeout or Manual Cancel)
 	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// 3. All upstreams failed (Network errors)
@@ -158,11 +140,11 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 	}
 
 	logger.Warn("all upstreams failed completely", qCtx.InfoField(), zap.Error(detailedErr))
-	return nil, nil, detailedErr
+	return nil, detailedErr
 }
 
-func getRcodePriority(rcode int) int {
-	switch rcode {
+func getResponsePriority(r *dns.Msg) int {
+	switch r.Rcode {
 	case dns.RcodeNameError:
 		return priorityNXDomain
 	case dns.RcodeSuccess:
@@ -174,22 +156,9 @@ func getRcodePriority(rcode int) int {
 	}
 }
 
-func getRcodeStatus(r *dns.Msg, raw []byte) string {
-	var rcode int
-	var anCount uint16
-	if r != nil {
-		rcode = r.Rcode
-		anCount = uint16(len(r.Answer))
-	} else if len(raw) >= 12 {
-		h, _ := dnsutils.GetHeaderInfo(raw)
-		rcode = h.Rcode
-		anCount = h.ANCount
-	} else {
-		return "INVALID"
-	}
-
-	if rcode == dns.RcodeSuccess && anCount == 0 {
+func getRcodeStatus(r *dns.Msg) string {
+	if r.Rcode == dns.RcodeSuccess && len(r.Answer) == 0 {
 		return "NODATA"
 	}
-	return dns.RcodeToString[rcode]
+	return dns.RcodeToString[r.Rcode]
 }

@@ -21,7 +21,7 @@ const (
 var nopLogger = zap.NewNop()
 
 type Handler interface {
-	ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, []byte, error)
+	ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error)
 }
 
 type EntryHandlerOpts struct {
@@ -31,10 +31,10 @@ type EntryHandlerOpts struct {
 	RecursionAvailable bool
 
 	// New optional features for early blocking
-	BlockAAAA  bool
-	BlockPTR   bool
-	BlockHTTPS bool
-	BlockNoDot bool
+	BlockAAAA   bool
+	BlockPTR    bool
+	BlockHTTPS  bool
+	BlockNoDot  bool
 }
 
 func (opts *EntryHandlerOpts) Init() error {
@@ -59,7 +59,7 @@ func NewEntryHandler(opts EntryHandlerOpts) (Handler, error) {
 	return &EntryHandler{opts: opts}, nil
 }
 
-func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, []byte, error) {
+func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error) {
 	// 1. Context & Deadline Setup
 	qCtx := ctx
 	cancel := func() {}
@@ -73,12 +73,12 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 	// 2. Optimized Structural & Protocol Validation
 	if len(req.Question) != 1 {
 		h.opts.Logger.Debug("refused: invalid question count", zap.Uint16("id", req.Id))
-		return h.responseRefused(req), nil, nil
+		return h.responseRefused(req), nil
 	}
 
 	if req.Opcode != dns.OpcodeQuery {
 		h.opts.Logger.Debug("refused: unusual opcode", zap.Uint16("id", req.Id))
-		return h.responseRefused(req), nil, nil
+		return h.responseRefused(req), nil
 	}
 
 	// 3. RFC 8482 & Early Noise Filtering
@@ -102,7 +102,7 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 		if h.opts.RecursionAvailable {
 			r.RecursionAvailable = true
 		}
-		return r, nil, nil
+		return r, nil
 	}
 
 	// Early Noise Filtering based on options
@@ -114,7 +114,7 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 		if h.opts.RecursionAvailable {
 			r.RecursionAvailable = true
 		}
-		return r, nil, nil
+		return r, nil
 	}
 
 	// 4. Domain Validation & Lowercase Check (Single Pass)
@@ -134,7 +134,7 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 
 	// Optional check for missing dot separator (e.g., "localhost.")
 	if h.opts.BlockNoDot && !hasDot {
-		return h.responseNXDomain(req), nil, nil
+		return h.responseNXDomain(req), nil
 	}
 
 	// Only perform allocation if uppercase characters were detected
@@ -145,13 +145,13 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 	// 5. Final Hygiene Checks
 	if q.Qclass != dns.ClassINET {
 		h.opts.Logger.Debug("refused: unsupported qclass", zap.Uint16("id", req.Id))
-		return h.responseRefused(req), nil, nil
+		return h.responseRefused(req), nil
 	}
 
 	if req.Response || req.Authoritative || req.Truncated ||
 		req.RecursionAvailable || req.Zero || len(req.Answer) != 0 || len(req.Ns) != 0 {
 		h.opts.Logger.Debug("refused: malformed header flags or sections", zap.Uint16("id", req.Id))
-		return h.responseRefused(req), nil, nil
+		return h.responseRefused(req), nil
 	}
 
 	// 6. Execution Flow
@@ -160,7 +160,6 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 
 	err := h.opts.Entry.Exec(qCtx, queryCtx, nil)
 	respMsg := queryCtx.R()
-	rawResp := queryCtx.RawR()
 
 	// 7. Logging
 	if err != nil {
@@ -192,7 +191,7 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 	}
 	respMsg.Id = origID
 
-	return respMsg, rawResp, nil
+	return respMsg, nil
 }
 
 func (h *EntryHandler) responseRefused(req *dns.Msg) *dns.Msg {

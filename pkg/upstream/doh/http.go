@@ -14,10 +14,9 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
-	C "github.com/pmkol/mosdns-x/constant"
-	"github.com/pmkol/mosdns-x/pkg/dnsutils"
-	"github.com/pmkol/mosdns-x/pkg/pool"
 	"gitlab.com/go-extension/http"
+	C "github.com/pmkol/mosdns-x/constant"
+	"github.com/pmkol/mosdns-x/pkg/pool"
 )
 
 const dnsContentType = "application/dns-message"
@@ -36,15 +35,9 @@ func NewUpstream(url *url.URL, transport *http.Transport) *Upstream {
 	return &Upstream{url, transport}
 }
 
-func (u *Upstream) ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.Msg, []byte, error) {
-	r, err := u.Exchange(ctx, m)
-	return r, nil, err
-}
-
-func (u *Upstream) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
-	cm := dnsutils.ShadowCopy(m)
-	cm.Id = 0
-	wire, buf, err := pool.PackBuffer(cm)
+func (u *Upstream) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+	q.Id = 0
+	wire, buf, err := pool.PackBuffer(q)
 	if err != nil {
 		return nil, err
 	}

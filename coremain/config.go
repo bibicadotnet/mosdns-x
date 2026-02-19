@@ -65,16 +65,16 @@ type ServerListenerConfig struct {
 
 	Cert                string `yaml:"cert"`                    // certificate path, used by dot, doh, doq
 	Key                 string `yaml:"key"`                     // certificate key path, used by dot, doh, doq
-	KernelTX            bool   `yaml:"kernel_tx"`               // use kernel tls to send data
-	KernelRX            bool   `yaml:"kernel_rx"`               // use kernel tls to receive data
-	URLPath             string `yaml:"url_path"`                // used by doh, http. If it's empty, any path will be handled.
-	HealthPath          string `yaml:"health_path"`             // health check endpoint path
-	RedirectURL         string `yaml:"redirect_url"`            // redirect URL for non-DNS paths
+	KernelTX            bool   `yaml:"kernel_tx"`                // use kernel tls to send data
+	KernelRX            bool   `yaml:"kernel_rx"`                // use kernel tls to receive data
+	URLPath             string `yaml:"url_path"`                 // used by doh, http. If it's empty, any path will be handled.
+	HealthPath          string `yaml:"health_path"`              // health check endpoint path
+	RedirectURL         string `yaml:"redirect_url"`             // redirect URL for non-DNS paths
 	GetUserIPFromHeader string `yaml:"get_user_ip_from_header"` // used by doh, http, except "True-Client-IP" "X-Real-IP" "X-Forwarded-For".
-	ProxyProtocol       bool   `yaml:"proxy_protocol"`          // accepting the PROXYProtocol
+	ProxyProtocol       bool   `yaml:"proxy_protocol"`           // accepting the PROXYProtocol
 
-	IdleTimeout uint   `yaml:"idle_timeout"` // (sec) used by tcp, dot, doh as connection idle timeout.
-	AllowedSNI  string `yaml:"allowed_sni"`  // 只允许指定的SNI访问
+	IdleTimeout uint `yaml:"idle_timeout"` // (sec) used by tcp, dot, doh as connection idle timeout.
+	AllowedSNI  string `yaml:"allowed_sni"` // 只允许指定的SNI访问
 }
 
 type APIConfig struct {

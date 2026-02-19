@@ -109,14 +109,13 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 					return
 				}
 				go func() {
-					req, rawReq, _, err := dnsutils.ReadMsgFromTCP(stream)
+					req, _, err := dnsutils.ReadMsgFromTCP(stream)
 					timeout.Reset(idleTimeout)
 					if err != nil {
 						stream.CancelRead(1)
 						stream.CancelWrite(1)
 						return
 					}
-					_ = rawReq
 
 					defer stream.Close()
 					stream.CancelRead(0)
@@ -127,29 +126,17 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 						return
 					}
 
-					respMsg, rawR, err := handler.ServeDNS(quicConnCtx, req, meta)
+					r, err := handler.ServeDNS(quicConnCtx, req, meta)
 					if err != nil {
 						stream.CancelWrite(1)
 						s.opts.Logger.Debug("handler err", zap.Error(err))
 						return
 					}
 
-					if rawR != nil {
-						if _, err := dnsutils.WriteRawMsgToTCP(stream, rawR); err != nil {
-							stream.CancelWrite(1)
-							errStr := err.Error()
-							s.opts.Logger.Debug("failed to write response", zap.Stringer("client", c.RemoteAddr()), zap.Error(err))
-							if strings.Contains(errStr, "NO_ERROR") || strings.Contains(errStr, "idle timeout") {
-								return
-							}
-						}
-						return
-					}
-
-					b, buf, err := pool.PackBuffer(respMsg)
+					b, buf, err := pool.PackBuffer(r)
 					if err != nil {
 						stream.CancelWrite(1)
-						s.opts.Logger.Error("failed to pack handler's response", zap.Error(err), zap.Stringer("msg", respMsg))
+						s.opts.Logger.Error("failed to pack handler's response", zap.Error(err), zap.Stringer("msg", r))
 						return
 					}
 					defer buf.Release()

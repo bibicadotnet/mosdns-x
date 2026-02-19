@@ -93,18 +93,11 @@ func (s *Server) ServeUDP(c net.PacketConn) error {
 			meta := C.NewRequestMeta(clientAddr)
 			meta.SetProtocol(C.ProtocolUDP)
 
-			r, rawR, err := handler.ServeDNS(listenerCtx, q, meta)
+			r, err := handler.ServeDNS(listenerCtx, q, meta)
 			if err != nil {
 				s.opts.Logger.Warn("handler err", zap.Error(err))
 				return
 			}
-			if rawR != nil {
-				if _, err := cmc.writeTo(rawR, localAddr, ifIndex, remoteAddr); err != nil {
-					s.opts.Logger.Warn("failed to write response", zap.Stringer("client", remoteAddr), zap.Error(err))
-				}
-				return
-			}
-
 			if r != nil {
 				r.Truncate(getUDPSize(q))
 				b, buf, err := pool.PackBuffer(r)

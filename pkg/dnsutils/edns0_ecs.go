@@ -58,6 +58,7 @@ func RemoveECS(opt *dns.OPT) {
 			return
 		}
 	}
+	return
 }
 
 // AddECS adds ecs to opt.

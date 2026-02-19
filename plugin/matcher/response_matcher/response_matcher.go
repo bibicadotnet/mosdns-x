@@ -34,7 +34,7 @@ type Args struct {
 
 type responseMatcher struct {
 	*coremain.BP
-	args         *Args
+	args *Args
 	matcherGroup []executable_seq.Matcher
 	closer       []io.Closer
 }

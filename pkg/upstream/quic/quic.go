@@ -21,7 +21,6 @@ package quic
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"sync"
 
@@ -150,65 +149,53 @@ func (h *Upstream) Close() error {
 	return nil
 }
 
-func (h *Upstream) ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.Msg, []byte, error) {
-	return h.Exchange(ctx, m)
-}
-
-func (h *Upstream) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, []byte, error) {
-	cq := dnsutils.ShadowCopy(q)
-	cq.Id = 0
+func (h *Upstream) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+	q.Id = 0
 	var err error
 	for range 3 {
 		var conn *Conn
 		conn, err = h.offer(ctx)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		var resp *dns.Msg
-		var raw []byte
-		resp, raw, err = exchangeMsg(ctx, conn, cq)
+		resp, err = exchangeMsg(ctx, conn, q)
 		if err == nil {
-			return resp, raw, err
+			return resp, err
 		}
 	}
-	return nil, nil, err
+	return nil, err
 }
 
-func exchangeMsg(ctx context.Context, conn *Conn, q *dns.Msg) (*dns.Msg, []byte, error) {
-	resp, raw, err := exchange(ctx, conn, q)
+func exchangeMsg(ctx context.Context, conn *Conn, q *dns.Msg) (*dns.Msg, error) {
+	resp, err := exchange(ctx, conn, q)
 	if errors.Is(err, quic.Err0RTTRejected) {
 		select {
 		case <-conn.closed:
-			return nil, nil, &closedConnError{}
+			return nil, &closedConnError{}
 		case <-conn.handshaked:
 			return exchange(ctx, conn, q)
 		}
 	}
-	return resp, raw, err
+	return resp, err
 }
 
-func exchange(ctx context.Context, conn *Conn, q *dns.Msg) (*dns.Msg, []byte, error) {
+func exchange(ctx context.Context, conn *Conn, q *dns.Msg) (*dns.Msg, error) {
 	stream, err := conn.openStreamSync(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	_, err = dnsutils.WriteMsgToTCP(stream, q)
 	if err != nil {
 		stream.CancelRead(1)
 		stream.CancelWrite(1)
-		return nil, nil, err
+		return nil, err
 	}
 	stream.Close()
-	m, raw, _, err := dnsutils.ReadMsgFromTCP(stream)
+	r, _, err := dnsutils.ReadMsgFromTCP(stream)
 	if err != nil {
 		stream.CancelRead(1)
-		return nil, nil, err
+		return nil, err
 	}
-	if m != nil {
-		m.Id = q.Id
-	}
-	if raw != nil {
-		binary.BigEndian.PutUint16(raw[0:2], q.Id)
-	}
-	return m, raw, err
+	return r, nil
 }

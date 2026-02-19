@@ -32,6 +32,7 @@ func UpgradeEDNS0(m *dns.Msg) *dns.OPT {
 	return o
 }
 
+// RemoveEDNS0 removes the OPT record from m.
 func RemoveEDNS0(m *dns.Msg) {
 	for i := len(m.Extra) - 1; i >= 0; i-- {
 		if m.Extra[i].Header().Rrtype == dns.TypeOPT {
@@ -39,6 +40,7 @@ func RemoveEDNS0(m *dns.Msg) {
 			return
 		}
 	}
+	return
 }
 
 func RemoveEDNS0Option(opt *dns.OPT, option uint16) {
@@ -48,6 +50,7 @@ func RemoveEDNS0Option(opt *dns.OPT, option uint16) {
 			return
 		}
 	}
+	return
 }
 
 func GetEDNS0Option(opt *dns.OPT, option uint16) dns.EDNS0 {

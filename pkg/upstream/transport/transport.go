@@ -2,7 +2,6 @@ package transport
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -13,7 +12,6 @@ import (
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
 
-	"github.com/pmkol/mosdns-x/pkg/dnsutils"
 	"github.com/pmkol/mosdns-x/pkg/utils"
 )
 
@@ -29,7 +27,7 @@ const (
 	defaultDialTimeout             = time.Second * 7
 	defaultNoConnReuseQueryTimeout = time.Second * 7
 	defaultMaxConns                = 2
-	defaultMaxQueryPerConn         = 65535
+	defaultMaxQueryPerConn          = 65535
 
 	writeTimeout        = time.Second
 	connTooOldThreshold = time.Millisecond * 1500
@@ -48,7 +46,7 @@ type Opts struct {
 	WriteFunc func(c io.Writer, m *dns.Msg) (int, error)
 	// ReadFunc specifies the method to read a wire dns msg from the connection
 	// opened by the DialFunc.
-	ReadFunc func(c io.Reader) (*dns.Msg, []byte, int, error)
+	ReadFunc func(c io.Reader) (*dns.Msg, int, error)
 
 	// DialTimeout specifies the timeout for DialFunc.
 	// Default is defaultDialTimeout.
@@ -126,9 +124,9 @@ func (t *Transport) isClosed() bool {
 	return t.closedAtomic.Load()
 }
 
-func (t *Transport) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, []byte, error) {
+func (t *Transport) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	if t.isClosed() {
-		return nil, nil, errClosedTransport
+		return nil, errClosedTransport
 	}
 
 	if t.opts.IdleTimeout <= 0 {
@@ -163,7 +161,7 @@ func (t *Transport) Close() error {
 	return nil
 }
 
-func (t *Transport) exchangeWithPipelineConn(ctx context.Context, m *dns.Msg) (*dns.Msg, []byte, error) {
+func (t *Transport) exchangeWithPipelineConn(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	const maxRetry = 3
 
 	attempt := 0
@@ -171,7 +169,7 @@ func (t *Transport) exchangeWithPipelineConn(ctx context.Context, m *dns.Msg) (*
 	for {
 		attempt++
 		if ctx.Err() != nil {
-			return nil, nil, ctx.Err()
+			return nil, ctx.Err()
 		}
 
 		if latestErr != nil {
@@ -180,28 +178,27 @@ func (t *Transport) exchangeWithPipelineConn(ctx context.Context, m *dns.Msg) (*
 
 		conn, allocatedQid, isNewConn, wg, err := t.getPipelineConn()
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
-		r, raw, err := conn.exchangePipeline(ctx, m, allocatedQid)
+		r, err := conn.exchangePipeline(ctx, m, allocatedQid)
 		wg.Done()
 
 		if err != nil {
 			// Tối ưu: Chặn đứng Retry nếu lỗi là context.Canceled (client đã ngắt kết nối)
 			if !isNewConn && attempt <= maxRetry && !errors.Is(err, context.Canceled) {
-				latestErr = err
 				continue
 			}
-			return nil, nil, err
+			return nil, err
 		}
-		return r, raw, nil
+		return r, nil
 	}
 }
 
-func (t *Transport) exchangeWithoutConnReuse(ctx context.Context, m *dns.Msg) (*dns.Msg, []byte, error) {
+func (t *Transport) exchangeWithoutConnReuse(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	conn, err := t.opts.DialFunc(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer conn.Close()
 
@@ -209,30 +206,29 @@ func (t *Transport) exchangeWithoutConnReuse(ctx context.Context, m *dns.Msg) (*
 
 	_, err = t.opts.WriteFunc(conn, m)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	type result struct {
 		m   *dns.Msg
-		raw []byte
 		err error
 	}
 
 	resChan := make(chan *result, 1)
 	go func() {
-		m, b, _, err := t.opts.ReadFunc(conn)
-		resChan <- &result{m, b, err}
+		b, _, err := t.opts.ReadFunc(conn)
+		resChan <- &result{b, err}
 	}()
 
 	select {
 	case res := <-resChan:
-		return res.m, res.raw, res.err
+		return res.m, res.err
 	case <-ctx.Done():
-		return nil, nil, ctx.Err()
+		return nil, ctx.Err()
 	}
 }
 
-func (t *Transport) exchangeWithReusableConn(ctx context.Context, m *dns.Msg) (*dns.Msg, []byte, error) {
+func (t *Transport) exchangeWithReusableConn(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	const maxRetry = 3
 
 	attempt := 0
@@ -240,7 +236,7 @@ func (t *Transport) exchangeWithReusableConn(ctx context.Context, m *dns.Msg) (*
 	for {
 		attempt++
 		if ctx.Err() != nil {
-			return nil, nil, ctx.Err()
+			return nil, ctx.Err()
 		}
 
 		if latestErr != nil {
@@ -249,21 +245,20 @@ func (t *Transport) exchangeWithReusableConn(ctx context.Context, m *dns.Msg) (*
 
 		conn, isNewConn, err := t.getReusableConn()
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
-		r, raw, err := conn.exchangeConnReuse(ctx, m)
+		r, err := conn.exchangeConnReuse(ctx, m)
 		t.releaseReusableConn(conn, err)
 		if err != nil {
 			// Tối ưu: Chặn đứng Retry nếu lỗi là context.Canceled (client đã ngắt kết nối)
 			if !isNewConn && attempt <= maxRetry && !errors.Is(err, context.Canceled) {
-				latestErr = err
 				continue
 			}
-			return nil, nil, err
+			return nil, err
 		}
 
-		return r, raw, nil
+		return r, nil
 	}
 }
 
@@ -397,8 +392,8 @@ func (t *Transport) connTooOld(c *dnsConn) bool {
 type dnsConn struct {
 	t *Transport
 
-	queueMu sync.Mutex                  // queue lock
-	queue   map[uint16]chan interface{} // Can be *dns.Msg or []byte (raw)
+	queueMu sync.Mutex // queue lock
+	queue   map[uint16]chan *dns.Msg
 
 	connMu             sync.Mutex
 	dialFinishedNotify chan struct{}
@@ -415,44 +410,39 @@ func newDNSConn(t *Transport) *dnsConn {
 	dc := &dnsConn{
 		t:                  t,
 		dialFinishedNotify: make(chan struct{}),
-		queue:              make(map[uint16]chan interface{}),
+		queue:              make(map[uint16]chan *dns.Msg),
 		closeNotify:        make(chan struct{}),
 	}
 	go dc.dialAndRead()
 	return dc
 }
 
-func (dc *dnsConn) exchangeConnReuse(ctx context.Context, q *dns.Msg) (*dns.Msg, []byte, error) {
+func (dc *dnsConn) exchangeConnReuse(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	return dc.exchange(ctx, q)
 }
 
-func (dc *dnsConn) exchangePipeline(ctx context.Context, q *dns.Msg, allocatedQid uint16) (*dns.Msg, []byte, error) {
-	qSend := dnsutils.ShadowCopy(q)
+func (dc *dnsConn) exchangePipeline(ctx context.Context, q *dns.Msg, allocatedQid uint16) (*dns.Msg, error) {
+	qSend := shadowCopy(q)
 	qSend.Id = allocatedQid
-	r, raw, err := dc.exchange(ctx, qSend)
+	r, err := dc.exchange(ctx, qSend)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	if r != nil {
-		r.Id = q.Id
-	}
-	if raw != nil {
-		binary.BigEndian.PutUint16(raw[0:2], q.Id)
-	}
-	return r, raw, nil
+	r.Id = q.Id
+	return r, nil
 }
 
-func (dc *dnsConn) exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, []byte, error) {
+func (dc *dnsConn) exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	select {
 	case <-dc.dialFinishedNotify:
 	case <-dc.closeNotify:
-		return nil, nil, dc.closeErr
+		return nil, dc.closeErr
 	case <-ctx.Done():
-		return nil, nil, ctx.Err()
+		return nil, ctx.Err()
 	}
 
 	qid := q.Id
-	resChan := make(chan interface{}, 1)
+	resChan := make(chan *dns.Msg, 1)
 	dc.addQueueC(qid, resChan)
 	defer dc.deleteQueueC(qid)
 
@@ -461,23 +451,16 @@ func (dc *dnsConn) exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, []byte, 
 	if err != nil {
 		// Write error usually is fatal. Abort and close this connection.
 		dc.closeWithErr(err)
-		return nil, nil, err
+		return nil, err
 	}
 
 	select {
 	case <-ctx.Done():
-		return nil, nil, ctx.Err()
+		return nil, ctx.Err()
 	case r := <-resChan:
-		switch v := r.(type) {
-		case *dns.Msg:
-			return v, nil, nil
-		case []byte:
-			return nil, v, nil
-		default:
-			return nil, nil, errors.New("unexpected response type")
-		}
+		return r, nil
 	case <-dc.closeNotify:
-		return nil, nil, dc.closeErr
+		return nil, dc.closeErr
 	}
 }
 
@@ -507,7 +490,7 @@ func (dc *dnsConn) dialAndRead() {
 func (dc *dnsConn) readLoop() {
 	dc.c.SetReadDeadline(time.Now().Add(dc.t.opts.IdleTimeout))
 	for {
-		m, raw, _, err := dc.t.opts.ReadFunc(dc.c)
+		r, _, err := dc.t.opts.ReadFunc(dc.c)
 		if err != nil {
 			dc.closeWithErr(err) // abort this connection.
 			return
@@ -516,23 +499,10 @@ func (dc *dnsConn) readLoop() {
 		dc.c.SetReadDeadline(time.Now().Add(dc.t.opts.IdleTimeout))
 		dc.updateReadTime()
 
-		var qid uint16
-		if m != nil {
-			qid = m.Id
-		} else if len(raw) >= 2 {
-			qid = binary.BigEndian.Uint16(raw[0:2])
-		}
-
-		resChan := dc.getQueueC(qid)
+		resChan := dc.getQueueC(r.Id)
 		if resChan != nil {
-			var resp interface{}
-			if raw != nil {
-				resp = raw
-			} else {
-				resp = m
-			}
 			select {
-			case resChan <- resp:
+			case resChan <- r: // resChan has buffer
 			default:
 			}
 		}
@@ -567,13 +537,13 @@ func (dc *dnsConn) queueLen() int {
 	return len(dc.queue)
 }
 
-func (dc *dnsConn) getQueueC(qid uint16) chan<- interface{} {
+func (dc *dnsConn) getQueueC(qid uint16) chan<- *dns.Msg {
 	dc.queueMu.Lock()
 	defer dc.queueMu.Unlock()
 	return dc.queue[qid]
 }
 
-func (dc *dnsConn) addQueueC(qid uint16, c chan interface{}) {
+func (dc *dnsConn) addQueueC(qid uint16, c chan *dns.Msg) {
 	dc.queueMu.Lock()
 	defer dc.queueMu.Unlock()
 	dc.queue[qid] = c

@@ -74,7 +74,6 @@ type Context struct {
 	reqMeta       *RequestMeta
 
 	r     *dns.Msg
-	rawR  []byte // wire format response (e.g., from cache)
 	marks map[uint]struct{}
 }
 
@@ -135,43 +134,13 @@ func (ctx *Context) ReqMeta() *RequestMeta {
 }
 
 // R returns the response.
-// If ctx.r is nil but ctx.rawR is not, it performs an on-demand Unpack and clears rawR.
 func (ctx *Context) R() *dns.Msg {
-	if ctx.r != nil {
-		return ctx.r
-	}
-	if len(ctx.rawR) > 0 {
-		m := new(dns.Msg)
-		if err := m.Unpack(ctx.rawR); err == nil {
-			ctx.r = m
-			ctx.rawR = nil // Clear rawR to ensure consistency if r is modified.
-			return m
-		}
-	}
-	return nil
+	return ctx.r
 }
 
-// SetResponse stores the response r to the context and clears rawR if r is not nil.
+// SetResponse stores the response r to the context.
 func (ctx *Context) SetResponse(r *dns.Msg) {
-	if r == nil {
-		return
-	}
 	ctx.r = r
-	ctx.rawR = nil
-}
-
-// RawR returns the raw response.
-func (ctx *Context) RawR() []byte {
-	return ctx.rawR
-}
-
-// SetRawResponse stores the raw response b to the context and clears r if b is not nil.
-func (ctx *Context) SetRawResponse(b []byte) {
-	if b == nil {
-		return
-	}
-	ctx.rawR = b
-	ctx.r = nil
 }
 
 // Id returns the Context id.
@@ -217,10 +186,6 @@ func (ctx *Context) CopyTo(d *Context) *Context {
 
 	if r := ctx.r; r != nil {
 		d.r = r.Copy()
-	}
-	if ctx.rawR != nil {
-		d.rawR = make([]byte, len(ctx.rawR))
-		copy(d.rawR, ctx.rawR)
 	}
 	for m := range ctx.marks {
 		d.AddMark(m)

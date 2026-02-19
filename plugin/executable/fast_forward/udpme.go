@@ -31,7 +31,7 @@ func (u *udpmeUpstream) Trusted() bool {
 	return true
 }
 
-func (u *udpmeUpstream) ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.Msg, []byte, error) {
+func (u *udpmeUpstream) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	ddl, ok := ctx.Deadline()
 	if !ok {
 		ddl = time.Now().Add(time.Second * 3)
@@ -42,18 +42,18 @@ func (u *udpmeUpstream) ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.M
 	}
 	mc := m.Copy()
 	mc.SetEdns0(512, false)
-	r, raw, err := u.exchangeOPTM(mc, ddl)
+	r, err := u.exchangeOPTM(mc, ddl)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	dnsutils.RemoveEDNS0(r)
-	return r, raw, nil
+	return r, nil
 }
 
-func (u *udpmeUpstream) exchangeOPTM(m *dns.Msg, ddl time.Time) (*dns.Msg, []byte, error) {
+func (u *udpmeUpstream) exchangeOPTM(m *dns.Msg, ddl time.Time) (*dns.Msg, error) {
 	c, err := dns.Dial("udp", u.addr)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer c.Close()
 	c.SetDeadline(ddl)
@@ -62,23 +62,19 @@ func (u *udpmeUpstream) exchangeOPTM(m *dns.Msg, ddl time.Time) (*dns.Msg, []byt
 	}
 
 	if err := c.WriteMsg(m); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	for {
-		// dns.Conn doesn't return raw bytes easily.
-		// We could pack it ourselves, but for udpme it's fine to return nil raw for now.
-		// Or we can use a custom read loop.
-		// Since udpme is experimental, return nil raw.
 		r, err := c.ReadMsg()
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		// UDPME logic: Only accept responses that contain EDNS0.
 		// This is a mitigation against simple UDP spoofing.
 		if r.IsEdns0() == nil {
 			continue
 		}
-		return r, nil, nil
+		return r, nil
 	}
 }

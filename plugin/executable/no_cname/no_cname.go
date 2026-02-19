@@ -30,9 +30,9 @@ type noCNAME struct {
 // (immediately before '- _return') to process responses first.
 //
 // Example YAML:
-//    - ... (other plugins)
-//    - _no_cname    <-- Place at the BOTTOM
-//    - _return
+//   - ... (other plugins)
+//   - _no_cname    <-- Place at the BOTTOM
+//   - _return
 func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	// 1. Upstream execution first (wait for response).
 	if err := executable_seq.ExecChainNode(ctx, qCtx, next); err != nil {

@@ -15,7 +15,7 @@ func GetTimer(d time.Duration) *time.Timer {
 	if !ok {
 		return time.NewTimer(d)
 	}
-
+	
 	// If Reset returns true, the timer was still active.
 	// Instead of panicking, we stop it and create a fresh one to be safe.
 	if !timer.Stop() {
@@ -34,7 +34,7 @@ func ReleaseTimer(timer *time.Timer) {
 	if timer == nil {
 		return
 	}
-
+	
 	if !timer.Stop() {
 		select {
 		case <-timer.C:
@@ -49,7 +49,7 @@ func ResetAndDrainTimer(timer *time.Timer, d time.Duration) {
 	if timer == nil {
 		return
 	}
-
+	
 	if !timer.Stop() {
 		select {
 		case <-timer.C:

@@ -69,7 +69,7 @@ func (p *limitIPPlugin) Exec(ctx context.Context, qCtx *query_context.Context, n
 	}
 
 	// 3. In-place Truncation:
-	// Safe to truncate now because _no_cname (below in YAML) has already
+	// Safe to truncate now because _no_cname (below in YAML) has already 
 	// flattened the response during the initial phase of the response stack.
 	r.Answer = r.Answer[:p.limit]
 

@@ -1,5 +1,5 @@
 /*
- * _pre_reject is a heuristic pre-filter to reduce DNS noise and
+ * _pre_reject is a heuristic pre-filter to reduce DNS noise and 
  * common human typing errors. It is NOT a security or blacklist engine.
  *
  * Usage in config:

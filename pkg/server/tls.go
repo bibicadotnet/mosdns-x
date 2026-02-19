@@ -24,13 +24,13 @@ func init() {
 	resetKey, sessionKey, err := loadOrCreateKeys()
 	if err != nil {
 		log.Printf("[WARN] Failed to load persistent keys: %v, using ephemeral keys", err)
-
+		
 		var tmpResetKey quic.StatelessResetKey
 		if _, err := rand.Read(tmpResetKey[:]); err != nil {
 			log.Fatalf("[FATAL] Failed to generate ephemeral reset key: %v", err)
 		}
 		statelessResetKey = &tmpResetKey
-
+		
 		if _, err := rand.Read(tlsSessionTicketKey[:]); err != nil {
 			log.Fatalf("[FATAL] Failed to generate ephemeral session ticket key: %v", err)
 		}
@@ -45,25 +45,25 @@ func loadOrCreateKeys() (*quic.StatelessResetKey, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-
+	
 	execDir := filepath.Dir(execPath)
 	keyDir := filepath.Join(execDir, "key")
 	resetKeyFile := filepath.Join(keyDir, ".mosdns_stateless_reset.key")
 	sessionKeyFile := filepath.Join(keyDir, ".mosdns_session_ticket.key")
-
+	
 	resetKey, err := loadOrCreateSingleKey(resetKeyFile, keyDir, "stateless reset")
 	if err != nil {
 		return nil, nil, err
 	}
-
+	
 	sessionKey, err := loadOrCreateSingleKey(sessionKeyFile, keyDir, "session ticket")
 	if err != nil {
 		return nil, nil, err
 	}
-
+	
 	var quicResetKey quic.StatelessResetKey
 	copy(quicResetKey[:], resetKey)
-
+	
 	return &quicResetKey, sessionKey, nil
 }
 
@@ -72,7 +72,7 @@ func loadOrCreateSingleKey(keyFile string, keyDir string, keyType string) ([]byt
 		log.Printf("[INFO] Loaded %s key from: %s", keyType, keyFile)
 		return data, nil
 	}
-
+	
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		return nil, err
@@ -81,11 +81,11 @@ func loadOrCreateSingleKey(keyFile string, keyDir string, keyType string) ([]byt
 	if err := os.MkdirAll(keyDir, 0700); err != nil {
 		return nil, err
 	}
-
+	
 	if err := os.WriteFile(keyFile, key, 0600); err != nil {
 		return nil, err
 	}
-
+	
 	log.Printf("[INFO] Created new %s key: %s", keyType, keyFile)
 	return key, nil
 }
@@ -107,7 +107,7 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 	if err != nil {
 		return nil, err
 	}
-
+	
 	cc := &cert[T]{}
 	cc.set(&c)
 
@@ -118,14 +118,14 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 			return
 		}
 		defer watcher.Close()
-
+		
 		if err := watcher.Add(certFile); err != nil {
 			log.Printf("[WARN] Failed to watch certificate file %s: %v", certFile, err)
 		}
 		if err := watcher.Add(keyFile); err != nil {
 			log.Printf("[WARN] Failed to watch key file %s: %v", keyFile, err)
 		}
-
+		
 		timer := time.NewTimer(0)
 		if !timer.Stop() {
 			select {
@@ -133,7 +133,7 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 			default:
 			}
 		}
-
+		
 		reloadCert := func() {
 			newCert, err := createFunc(certFile, keyFile)
 			if err != nil {
@@ -145,7 +145,7 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 		}
 
 		needReWatch := false
-
+		
 		for {
 			select {
 			case e, ok := <-watcher.Events:
@@ -159,7 +159,7 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 				if e.Has(fsnotify.Remove) || e.Has(fsnotify.Rename) {
 					log.Printf("[INFO] Certificate file %s was removed/renamed, re-watching original paths", e.Name)
 					needReWatch = true
-
+					
 					if !timer.Stop() {
 						select {
 						case <-timer.C:
@@ -169,11 +169,11 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 					timer.Reset(2 * time.Second)
 					continue
 				}
-
+				
 				if e.Has(fsnotify.Chmod) {
 					continue
 				}
-
+				
 				if !timer.Stop() {
 					select {
 					case <-timer.C:
@@ -181,7 +181,7 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 					}
 				}
 				timer.Reset(2 * time.Second)
-
+				
 			case <-timer.C:
 				log.Printf("[INFO] Certificate reload timer fired")
 				if needReWatch {
@@ -196,7 +196,7 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 					}
 				}
 				reloadCert()
-
+				
 			case err := <-watcher.Errors:
 				if err != nil {
 					log.Printf("[ERROR] Certificate watcher error: %v", err)
@@ -204,7 +204,7 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 			}
 		}
 	}()
-
+	
 	return cc, nil
 }
 
@@ -212,17 +212,17 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 	if s.opts.Cert == "" || s.opts.Key == "" {
 		return nil, errors.New("missing certificate for tls listener")
 	}
-
+	
 	c, err := tryCreateWatchCert(s.opts.Cert, s.opts.Key, tls.LoadX509KeyPair, s.opts.Logger)
 	if err != nil {
 		return nil, err
 	}
-
+	
 	tr := &quic.Transport{
 		Conn:              conn,
 		StatelessResetKey: statelessResetKey,
 	}
-
+	
 	return tr.ListenEarly(&tls.Config{
 		NextProtos:       nextProtos,
 		SessionTicketKey: tlsSessionTicketKey,
@@ -238,12 +238,12 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 			if cert == nil {
 				return nil, errors.New("certificate not available")
 			}
-
+			
 			// SNI filtering with silent fallback
 			if allowedSNI != "" && chi.ServerName != "" && chi.ServerName != allowedSNI {
 				// Silent fallback for compatibility
 			}
-
+			
 			return cert, nil
 		},
 	}, &quic.Config{
@@ -259,16 +259,16 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 	if s.opts.Cert == "" || s.opts.Key == "" {
 		return nil, errors.New("missing certificate for tls listener")
 	}
-
+	
 	c, err := tryCreateWatchCert(s.opts.Cert, s.opts.Key, eTLS.LoadX509KeyPair, s.opts.Logger)
 	if err != nil {
 		return nil, err
 	}
-
+	
 	return eTLS.NewListener(l, &eTLS.Config{
 		SessionTicketKey: tlsSessionTicketKey,
-		KernelTX:         s.opts.KernelTX,
-		KernelRX:         s.opts.KernelRX,
+		KernelTX:          s.opts.KernelTX,
+		KernelRX:          s.opts.KernelRX,
 		AllowEarlyData:   true,
 		MaxEarlyData:     4096,
 		NextProtos:       nextProtos,
@@ -291,7 +291,7 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 		CurvePreferences: []eTLS.CurveID{
 			eTLS.X25519,
 			eTLS.CurveP256,
-		},
+		},		
 
 		Defaults: eTLS.Defaults{
 			AllSecureCipherSuites: false,
@@ -303,11 +303,11 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 			if cert == nil {
 				return nil, errors.New("certificate not available")
 			}
-
+			
 			if allowedSNI != "" && chi.ServerName != "" && chi.ServerName != allowedSNI {
 				// Silent fallback for compatibility
 			}
-
+			
 			return cert, nil
 		},
 	}), nil

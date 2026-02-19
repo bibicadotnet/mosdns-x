@@ -32,7 +32,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	C "github.com/pmkol/mosdns-x/constant"
-	"github.com/pmkol/mosdns-x/pkg/dnsutils"
 	"github.com/pmkol/mosdns-x/pkg/pool"
 )
 
@@ -49,17 +48,11 @@ func NewUpstream(url *url.URL, transport *http3.Transport) *Upstream {
 	return &Upstream{url, transport}
 }
 
-func (u *Upstream) ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.Msg, []byte, error) {
-	r, err := u.Exchange(ctx, m)
-	return r, nil, err
-}
-
-func (u *Upstream) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+func (u *Upstream) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cq := dnsutils.ShadowCopy(q)
-	cq.Id = 0
-	wire, buf, err := pool.PackBuffer(cq)
+	q.Id = 0
+	wire, buf, err := pool.PackBuffer(q)
 	if err != nil {
 		return nil, err
 	}

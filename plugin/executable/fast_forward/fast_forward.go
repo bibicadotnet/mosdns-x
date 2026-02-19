@@ -43,7 +43,7 @@ type fastForward struct {
 
 type Args struct {
 	Upstream []*UpstreamConfig `yaml:"upstream"`
-	CA       []string          `yaml:"ca"`
+	CA        []string          `yaml:"ca"`
 }
 
 type UpstreamConfig struct {
@@ -140,7 +140,7 @@ type upstreamWrapper struct {
 	u       upstream.Upstream
 }
 
-func (u *upstreamWrapper) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, []byte, error) {
+func (u *upstreamWrapper) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	q.Compress = true
 	return u.u.ExchangeContext(ctx, q)
 }
@@ -162,12 +162,11 @@ func (f *fastForward) Exec(ctx context.Context, qCtx *query_context.Context, nex
 }
 
 func (f *fastForward) exec(ctx context.Context, qCtx *query_context.Context) (err error) {
-	r, raw, err := bundled_upstream.ExchangeParallel(ctx, qCtx, f.upstreamWrappers, f.L())
+	r, err := bundled_upstream.ExchangeParallel(ctx, qCtx, f.upstreamWrappers, f.L())
 	if err != nil {
 		return err
 	}
 	qCtx.SetResponse(r)
-	qCtx.SetRawResponse(raw)
 	return nil
 }
 

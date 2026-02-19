@@ -57,35 +57,35 @@ func newLogger(bp *coremain.BP, args *Args) coremain.Plugin {
 
 func (l *logger) Exec(ctx context.Context, qCtx *C.Context, next executable_seq.ExecutableChainNode) error {
 	err := executable_seq.ExecChainNode(ctx, qCtx, next)
-
+	
 	q := qCtx.Q()
 	if len(q.Question) != 1 {
 		return err
 	}
-
+	
 	// Skip logging for context cancellation/timeout (expected during client disconnect)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
 	}
-
+	
 	question := q.Question[0]
 	respRcode := -1
 	if r := qCtx.R(); r != nil {
 		respRcode = r.Rcode
 	}
-
+	
 	inboundInfo := []zap.Field{
 		zap.Uint32("uqid", qCtx.Id()),
 		zap.String("protocol", qCtx.ReqMeta().GetProtocol()),
 	}
-
+	
 	switch qCtx.ReqMeta().GetProtocol() {
 	case C.ProtocolHTTPS, C.ProtocolH2, C.ProtocolH3, C.ProtocolQUIC, C.ProtocolTLS:
 		inboundInfo = append(inboundInfo, zap.String("server_name", qCtx.ReqMeta().GetServerName()))
 	}
-
+	
 	l.BP.L().Info(
 		l.args.Msg,
 		append(inboundInfo,
@@ -96,6 +96,6 @@ func (l *logger) Exec(ctx context.Context, qCtx *C.Context, next executable_seq.
 			zap.Duration("elapsed", time.Since(qCtx.StartTime())),
 			zap.Error(err))...,
 	)
-
+	
 	return err
 }

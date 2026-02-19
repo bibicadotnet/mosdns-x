@@ -2,9 +2,9 @@ package dns_handler
 
 import (
 	"context"
+	"testing"
 	"github.com/miekg/dns"
 	"github.com/pmkol/mosdns-x/pkg/query_context"
-	"testing"
 )
 
 type DummyServerHandler struct {
