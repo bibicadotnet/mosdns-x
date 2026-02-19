@@ -151,8 +151,11 @@ func (ctx *Context) R() *dns.Msg {
 	return nil
 }
 
-// SetResponse stores the response r to the context and clears rawR.
+// SetResponse stores the response r to the context and clears rawR if r is not nil.
 func (ctx *Context) SetResponse(r *dns.Msg) {
+	if r == nil {
+		return
+	}
 	ctx.r = r
 	ctx.rawR = nil
 }
@@ -162,8 +165,11 @@ func (ctx *Context) RawR() []byte {
 	return ctx.rawR
 }
 
-// SetRawResponse stores the raw response b to the context and clears r.
+// SetRawResponse stores the raw response b to the context and clears r if b is not nil.
 func (ctx *Context) SetRawResponse(b []byte) {
+	if b == nil {
+		return
+	}
 	ctx.rawR = b
 	ctx.r = nil
 }
