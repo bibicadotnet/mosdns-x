@@ -1,0 +1,101 @@
+/*
+ * Copyright (C) 2020-2022, IrineSistiana
+ *
+ * This file is part of mosdns.
+ */
+
+package query_summary
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/pmkol/mosdns-x/coremain"
+	"github.com/pmkol/mosdns-x/pkg/executable_seq"
+	C "github.com/pmkol/mosdns-x/pkg/query_context"
+)
+
+const (
+	PluginType = "query_summary"
+)
+
+func init() {
+	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(*Args) })
+	coremain.RegNewPersetPluginFunc("_query_summary", func(bp *coremain.BP) (coremain.Plugin, error) {
+		return newLogger(bp, &Args{}), nil
+	})
+}
+
+var _ coremain.ExecutablePlugin = (*logger)(nil)
+
+type Args struct {
+	Msg string `yaml:"msg"`
+}
+
+func (a *Args) init() {
+	if len(a.Msg) == 0 {
+		a.Msg = "query summary"
+	}
+}
+
+type logger struct {
+	args *Args
+	*coremain.BP
+}
+
+func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
+	return newLogger(bp, args.(*Args)), nil
+}
+
+func newLogger(bp *coremain.BP, args *Args) coremain.Plugin {
+	args.init()
+	return &logger{BP: bp, args: args}
+}
+
+func (l *logger) Exec(ctx context.Context, qCtx *C.Context, next executable_seq.ExecutableChainNode) error {
+	err := executable_seq.ExecChainNode(ctx, qCtx, next)
+	
+	q := qCtx.Q()
+	if len(q.Question) != 1 {
+		return err
+	}
+	
+	// Skip logging for context cancellation/timeout (expected during client disconnect)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+	}
+	
+	question := q.Question[0]
+	respRcode := -1
+	if r := qCtx.R(); r != nil {
+		respRcode = r.Rcode
+	}
+	
+	inboundInfo := []zap.Field{
+		zap.Uint32("uqid", qCtx.Id()),
+		zap.String("protocol", qCtx.ReqMeta().GetProtocol()),
+	}
+	
+	switch qCtx.ReqMeta().GetProtocol() {
+	case C.ProtocolHTTPS, C.ProtocolH2, C.ProtocolH3, C.ProtocolQUIC, C.ProtocolTLS:
+		inboundInfo = append(inboundInfo, zap.String("server_name", qCtx.ReqMeta().GetServerName()))
+	}
+	
+	l.BP.L().Info(
+		l.args.Msg,
+		append(inboundInfo,
+			zap.String("qname", question.Name),
+			zap.Uint16("qtype", question.Qtype),
+			zap.Uint16("qclass", question.Qclass),
+			zap.Int("resp_rcode", respRcode),
+			zap.Duration("elapsed", time.Since(qCtx.StartTime())),
+			zap.Error(err))...,
+	)
+	
+	return err
+}
