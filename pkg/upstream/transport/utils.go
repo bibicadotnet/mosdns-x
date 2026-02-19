@@ -22,8 +22,6 @@ package transport
 import (
 	"context"
 	"time"
-
-	"github.com/miekg/dns"
 )
 
 // getContextDeadline tries to get the deadline of ctx or return a default
@@ -34,10 +32,4 @@ func getContextDeadline(ctx context.Context, defTimeout time.Duration) time.Time
 		return ddl
 	}
 	return time.Now().Add(defTimeout)
-}
-
-func shadowCopy(m *dns.Msg) *dns.Msg {
-	nm := new(dns.Msg)
-	*nm = *m
-	return nm
 }

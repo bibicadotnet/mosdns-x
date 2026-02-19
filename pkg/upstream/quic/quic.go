@@ -155,7 +155,8 @@ func (h *Upstream) ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.Msg, [
 }
 
 func (h *Upstream) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, []byte, error) {
-	q.Id = 0
+	cq := dnsutils.ShadowCopy(q)
+	cq.Id = 0
 	var err error
 	for range 3 {
 		var conn *Conn
@@ -165,7 +166,7 @@ func (h *Upstream) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, []byte, 
 		}
 		var resp *dns.Msg
 		var raw []byte
-		resp, raw, err = exchangeMsg(ctx, conn, q)
+		resp, raw, err = exchangeMsg(ctx, conn, cq)
 		if err == nil {
 			return resp, raw, err
 		}

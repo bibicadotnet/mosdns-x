@@ -13,6 +13,7 @@ import (
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
 
+	"github.com/pmkol/mosdns-x/pkg/dnsutils"
 	"github.com/pmkol/mosdns-x/pkg/utils"
 )
 
@@ -426,7 +427,7 @@ func (dc *dnsConn) exchangeConnReuse(ctx context.Context, q *dns.Msg) (*dns.Msg,
 }
 
 func (dc *dnsConn) exchangePipeline(ctx context.Context, q *dns.Msg, allocatedQid uint16) (*dns.Msg, []byte, error) {
-	qSend := shadowCopy(q)
+	qSend := dnsutils.ShadowCopy(q)
 	qSend.Id = allocatedQid
 	r, raw, err := dc.exchange(ctx, qSend)
 	if err != nil {

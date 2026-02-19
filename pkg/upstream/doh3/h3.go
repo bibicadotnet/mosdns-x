@@ -32,6 +32,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	C "github.com/pmkol/mosdns-x/constant"
+	"github.com/pmkol/mosdns-x/pkg/dnsutils"
 	"github.com/pmkol/mosdns-x/pkg/pool"
 )
 
@@ -56,8 +57,9 @@ func (u *Upstream) ExchangeContext(ctx context.Context, m *dns.Msg) (*dns.Msg, [
 func (u *Upstream) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	q.Id = 0
-	wire, buf, err := pool.PackBuffer(q)
+	cq := dnsutils.ShadowCopy(q)
+	cq.Id = 0
+	wire, buf, err := pool.PackBuffer(cq)
 	if err != nil {
 		return nil, err
 	}
