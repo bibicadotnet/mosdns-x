@@ -7,40 +7,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-// GetMsgKey generates a compact binary identification key.
-// Pre-condition: Detailed validations (e.g., Question count, normalization)
-// are skipped here as they are strictly enforced by upstream pipeline plugins.
-func GetMsgKey(m *dns.Msg, salt uint16) (string, error) {
-	q := m.Question[0]
-	size := len(q.Name) + 4 // Qname + Qtype(2) + Qclass(2)
-
-	var ecs *dns.EDNS0_SUBNET
-	// Pipeline architecture guarantees OPT is at Extra[0] and ECS is at Option[0].
-	if len(m.Extra) > 0 {
-		if opt, ok := m.Extra[0].(*dns.OPT); ok && len(opt.Option) > 0 {
-			if e, ok := opt.Option[0].(*dns.EDNS0_SUBNET); ok {
-				ecs = e
-				size += 3 + len(ecs.Address) // Family(2) + Mask(1) + Address
-			}
-		}
-	}
-
-	// Optimized for performance: Use make with capacity to avoid re-allocations.
-	// For small, short-lived keys, direct allocation is often faster than sync.Pool.
-	b := make([]byte, 0, size)
-	b = append(b, q.Name...)
-	b = append(b, byte(q.Qtype>>8), byte(q.Qtype))
-	b = append(b, byte(q.Qclass>>8), byte(q.Qclass))
-
-	if ecs != nil {
-		b = append(b, byte(ecs.Family>>8), byte(ecs.Family))
-		b = append(b, ecs.SourceNetmask)
-		b = append(b, ecs.Address...)
-	}
-
-	return string(b), nil
-}
-
 // GetMsgHash generates an 8-byte hash key for the message.
 // Pre-condition: Detailed validations (e.g., Question count, normalization)
 // are skipped here as they are strictly enforced by upstream pipeline plugins.
