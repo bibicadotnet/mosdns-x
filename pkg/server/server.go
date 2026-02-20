@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package server
 
 import (
@@ -51,18 +32,12 @@ type ServerOpts struct {
 	HttpHandler *H.Handler
 
 	// Certificate files to start DoT, DoH server.
-	// Only useful if there is no server certificate specified in TLSConfig.
 	Cert, Key string
 
-	// KernelTX and KernelRX control whether kernel TLS offloading is enabled
-	// If the kernel is not supported, it is automatically downgraded to the application implementation
-	//
-	// If this option is enabled, please mount the TLS module before you run application.
-	// On Linux, it will try to automatically mount the tls kernel module.
+	// KernelTX and KernelRX control whether kernel TLS offloading is enabled.
 	KernelRX, KernelTX bool
 
-	// IdleTimeout limits the maximum time period that a connection
-	// can idle. Default is defaultTCPIdleTimeout.
+	// IdleTimeout limits the maximum time period that a connection can idle.
 	IdleTimeout time.Duration
 }
 
@@ -76,11 +51,6 @@ func (opts *ServerOpts) init() {
 	}
 }
 
-// Server is a DNS server.
-// It's functions, Server.ServeUDP etc., will block and
-// close the net.Listener/net.PacketConn and always return
-// a non-nil error. If Server was closed, the returned err
-// will be ErrServerClosed.
 type Server struct {
 	opts ServerOpts
 
@@ -105,7 +75,6 @@ func (s *Server) Closed() bool {
 }
 
 // trackCloser adds or removes c to the Server and return true if Server is not closed.
-// We use a pointer in case the underlying value is incomparable.
 func (s *Server) trackCloser(c io.Closer, add bool) bool {
 	s.m.Lock()
 	defer s.m.Unlock()
@@ -134,9 +103,23 @@ func (s *Server) Close() {
 	}
 
 	s.closed = true
-	for closer := range s.closerTracker {
-		closer.Close()
+
+	// Copy all closers to a temporary slice to avoid holding the lock during Close() operations.
+	// This prevents potential deadlocks if a closer's Close method calls back into the server.
+	closers := make([]io.Closer, 0, len(s.closerTracker))
+	for c := range s.closerTracker {
+		closers = append(closers, c)
 	}
+
+	// Clear the tracker map and release the lock immediately.
+	s.closerTracker = nil
 	s.m.Unlock()
+
+	// Execute Close() on each tracker outside of the lock.
+	for _, c := range closers {
+		_ = c.Close()
+	}
+
+	// Wait for all server goroutines to exit.
 	s.wg.Wait()
 }
