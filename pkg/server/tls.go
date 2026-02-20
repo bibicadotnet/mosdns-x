@@ -247,12 +247,12 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 			return cert, nil
 		},
 	}, &quic.Config{
-	    Allow0RTT:                      true,
-	    InitialStreamReceiveWindow:     16 * 1024,
-	    MaxStreamReceiveWindow:         512 * 1024,
-	    InitialConnectionReceiveWindow: 32 * 1024,
-	    MaxConnectionReceiveWindow:     1024 * 1024,
-	    MaxIncomingStreams:              1000,
+		Allow0RTT:                      true,
+		InitialStreamReceiveWindow:     4 * 1024,
+		MaxStreamReceiveWindow:         16 * 1024,
+		InitialConnectionReceiveWindow: 32 * 1024,
+		MaxConnectionReceiveWindow:     64 * 1024,
+		MaxIncomingStreams:              300,
 	})
 }
 
