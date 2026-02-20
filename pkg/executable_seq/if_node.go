@@ -222,10 +222,12 @@ func (m *conditionMatcher) Match(ctx context.Context, qCtx *query_context.Contex
 		return false, fmt.Errorf("condition expression '%s' returned non-boolean: %v", m.expr.String(), out)
 	}
 
-	m.lg.Debug(
-		"condition matcher result",
-		paramsPH.makeResultZapFields(qCtx.InfoField(), res)...,
-	)
+	if m.lg.Core().Enabled(zap.DebugLevel) {
+	    m.lg.Debug(
+	        "condition matcher result",
+	        paramsPH.makeResultZapFields(qCtx.InfoField(), res)...,
+	    )
+	}
 	return res, nil
 }
 
