@@ -271,7 +271,7 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 		KernelTX:         s.opts.KernelTX,
 		KernelRX:         s.opts.KernelRX,
 		AllowEarlyData:   true,
-		MaxEarlyData:     4096,
+		MaxEarlyData:     16384,
 		NextProtos:       nextProtos,
 
 		CertificateCompressionPreferences: []eTLS.CertificateCompressionAlgorithm{
