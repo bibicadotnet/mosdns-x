@@ -188,22 +188,20 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 			return
 		}
 
-		// Security: Use pooled buffer to prevent excessive heap allocation
-		buf := pool.GetBuf(dns.MaxMsgSize + 1)
-		defer buf.Release()
-
-		// Read body into pooled buffer
-		n, err := io.ReadAtLeast(req.Body(), buf.AllBytes(), 1)
-		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		// FIX: Read up to MaxMsgSize+1 bytes using LimitReader.
+		// Previously used pool.GetBuf(dns.MaxMsgSize+1) = 65537 bytes which
+		// exceeded the Allocator's max slab class, causing 30GB+ of allocations
+		// with zero pool reuse. DNS messages in practice are 50–4096 bytes,
+		// so the runtime allocator handles these efficiently.
+		b, err = io.ReadAll(io.LimitReader(req.Body(), dns.MaxMsgSize+1))
+		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-
-		if n > dns.MaxMsgSize {
+		if len(b) > dns.MaxMsgSize {
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			return
 		}
-		b = buf.Bytes()[:n]
 
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
