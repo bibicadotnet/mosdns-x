@@ -1,9 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- */
-
 package doh
 
 import (
@@ -15,6 +9,7 @@ import (
 
 	"github.com/miekg/dns"
 	"gitlab.com/go-extension/http"
+
 	C "github.com/pmkol/mosdns-x/constant"
 	"github.com/pmkol/mosdns-x/pkg/pool"
 )
@@ -37,6 +32,7 @@ func NewUpstream(url *url.URL, transport *http.Transport) *Upstream {
 
 func (u *Upstream) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	q.Id = 0
+
 	wire, buf, err := pool.PackBuffer(q)
 	if err != nil {
 		return nil, err
@@ -47,7 +43,6 @@ func (u *Upstream) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, e
 	if err != nil {
 		return nil, err
 	}
-
 	req.Header.Set("Content-Type", dnsContentType)
 	req.Header.Set("Accept", dnsContentType)
 	req.Header.Set("User-Agent", defaultUserAgent)
@@ -58,7 +53,7 @@ func (u *Upstream) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, e
 	}
 	defer res.Body.Close()
 
-	if res.StatusCode != 200 {
+	if res.StatusCode < 200 || res.StatusCode > 299 {
 		return nil, fmt.Errorf("http %d", res.StatusCode)
 	}
 
@@ -73,11 +68,12 @@ func (u *Upstream) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, e
 		return nil, err
 	}
 
-	data := make([]byte, bb.Len())
-	copy(data, bb.Bytes())
+	if bb.Len() == 0 {
+		return nil, fmt.Errorf("empty response")
+	}
 
 	r := new(dns.Msg)
-	if err := r.Unpack(data); err != nil {
+	if err := r.Unpack(bb.Bytes()); err != nil {
 		return nil, err
 	}
 	return r, nil
