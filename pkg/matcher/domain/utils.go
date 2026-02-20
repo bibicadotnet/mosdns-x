@@ -56,10 +56,10 @@ func (s *ReverseDomainScanner) NextLabel() (label string) {
 }
 
 // NormalizeDomain normalize domain string s.
-// It removes the suffix "." and make sure the domain is in lower case.
-// e.g. a fqdn "GOOGLE.com." will become "google.com"
+// It removes the suffix "." only. Lowercase normalization is handled by entry_handler.
+// e.g. a fqdn "google.com." will become "google.com"
 func NormalizeDomain(s string) string {
-	return strings.ToLower(TrimDot(s))
+    return TrimDot(s)
 }
 
 // TrimDot trims suffix '.'
