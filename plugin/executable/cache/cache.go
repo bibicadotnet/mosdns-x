@@ -60,7 +60,6 @@ type cachePlugin struct {
 
 	// Pre-computed fields for hot path performance
 	lazyEnabled   bool
-	lazyWindow    time.Duration
 	lazyWindowSec int64
 	lazyReplyTTL  uint32
 
@@ -133,7 +132,6 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 		whenHit: whenHit,
 
 		lazyEnabled:   args.LazyCacheTTL > 0,
-		lazyWindow:    time.Duration(args.LazyCacheTTL) * time.Second,
 		lazyWindowSec: int64(args.LazyCacheTTL),
 		lazyReplyTTL:  uint32(args.LazyCacheReplyTTL),
 
