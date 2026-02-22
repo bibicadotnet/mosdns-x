@@ -241,18 +241,17 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 
 			// SNI filtering with silent fallback
 			if allowedSNI != "" && chi.ServerName != "" && chi.ServerName != allowedSNI {
-				// Silent fallback for compatibility
+				return nil, errors.New("invalid sni")
 			}
 
 			return cert, nil
 		},
 	}, &quic.Config{
 		Allow0RTT:                      true,
-        InitialStreamReceiveWindow:     16 * 1024,
-        MaxStreamReceiveWindow:         512 * 1024,
-        InitialConnectionReceiveWindow: 32 * 1024,
-        MaxConnectionReceiveWindow:     1024 * 1024,
-        MaxIncomingStreams:              1000,
+		InitialStreamReceiveWindow:     1252,
+		MaxStreamReceiveWindow:         4 * 1024,
+		InitialConnectionReceiveWindow: 8 * 1024,
+		MaxConnectionReceiveWindow:     16 * 1024,
 	})
 }
 
@@ -271,7 +270,7 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 		KernelTX:         s.opts.KernelTX,
 		KernelRX:         s.opts.KernelRX,
 		AllowEarlyData:   true,
-		MaxEarlyData:     16384,
+		MaxEarlyData:     4096,
 		NextProtos:       nextProtos,
 
 		CertificateCompressionPreferences: []eTLS.CertificateCompressionAlgorithm{
@@ -306,7 +305,7 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 			}
 
 			if allowedSNI != "" && chi.ServerName != "" && chi.ServerName != allowedSNI {
-				// Silent fallback for compatibility
+				return nil, errors.New("invalid sni")
 			}
 
 			return cert, nil
