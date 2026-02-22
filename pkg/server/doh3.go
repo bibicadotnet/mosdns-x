@@ -25,7 +25,7 @@ func (s *Server) ServeH3(l *quic.EarlyListener) error {
 	hs := &http3.Server{
 		Handler:        &httpHandlerWrapper{s},
 		IdleTimeout:    idleTimeout,
-		MaxHeaderBytes: 2048,
+		MaxHeaderBytes: 4096,
 	}
 	if ok := s.trackCloser(hs, true); !ok {
 		return ErrServerClosed
