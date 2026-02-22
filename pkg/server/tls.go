@@ -248,10 +248,11 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 		},
 	}, &quic.Config{
 		Allow0RTT:                      true,
-		InitialStreamReceiveWindow:     1252,
-		MaxStreamReceiveWindow:         4 * 1024,
-		InitialConnectionReceiveWindow: 8 * 1024,
-		MaxConnectionReceiveWindow:     16 * 1024,
+        InitialStreamReceiveWindow:     16 * 1024,
+        MaxStreamReceiveWindow:         512 * 1024,
+        InitialConnectionReceiveWindow: 32 * 1024,
+        MaxConnectionReceiveWindow:     1024 * 1024,
+        MaxIncomingStreams:              1000,
 	})
 }
 
@@ -270,7 +271,7 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 		KernelTX:         s.opts.KernelTX,
 		KernelRX:         s.opts.KernelRX,
 		AllowEarlyData:   true,
-		MaxEarlyData:     4096,
+		MaxEarlyData:     16384,
 		NextProtos:       nextProtos,
 
 		CertificateCompressionPreferences: []eTLS.CertificateCompressionAlgorithm{
