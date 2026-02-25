@@ -10,7 +10,7 @@ jobs:
       - name: get latest go version
         id: go
         run: |
-          echo version=1.25.7 >> $GITHUB_OUTPUT
+          echo version=1.26 >> $GITHUB_OUTPUT
 
       - name: Set up Go
         uses: actions/setup-go@v5.5.0
