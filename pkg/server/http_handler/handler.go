@@ -1,9 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- */
-
 package http_handler
 
 import (
@@ -15,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -142,17 +137,7 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 	switch req.Method() {
 	case http.MethodGet:
 		// 3. GET validation - RFC 8484 compliance
-		accept := req.Header().Get("Accept")
-		matched := false
-		for _, v := range strings.Split(accept, ",") {
-			mediatype := strings.TrimSpace(strings.SplitN(v, ";", 2)[0])
-			if mediatype == "application/dns-message" {
-				matched = true
-				break
-			}
-		}
-
-		if !matched {
+		if !strings.Contains(req.Header().Get("Accept"), "application/dns-message") {
 			if h.opts.RedirectURL != "" {
 				w.Header().Set("Location", h.opts.RedirectURL)
 				w.WriteHeader(http.StatusFound)
@@ -235,7 +220,7 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 
 	// 6. Finalize Response
 	w.Header().Set("Content-Type", "application/dns-message")
-	w.Header().Set("Cache-Control", fmt.Sprintf("max-age=%d", dnsutils.GetMinimalTTL(r)))
+	w.Header().Set("Cache-Control", "max-age="+strconv.Itoa(int(dnsutils.GetMinimalTTL(r))))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resBytes)
 }
