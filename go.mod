@@ -1,6 +1,6 @@
 module github.com/pmkol/mosdns-x
 
-go 1.25.5
+go 1.25.7
 
 require (
 	github.com/Knetic/govaluate v3.0.0+incompatible
