@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
@@ -24,7 +23,6 @@ import (
 
 var nopLogger = zap.NewNop()
 
-// proxyHeaders is defined as a package-level variable to avoid allocation on every request.
 var proxyHeaders = []string{"True-Client-IP", "X-Real-IP", "X-Forwarded-For"}
 
 type HandlerOpts struct {
@@ -60,11 +58,6 @@ func NewHandler(opts HandlerOpts) (*Handler, error) {
 	return &Handler{opts: opts}, nil
 }
 
-func (h *Handler) warnErr(req Request, err error) {
-	h.opts.Logger.Warn(err.Error(), zap.String("from", req.GetRemoteAddr()), zap.String("method", req.Method()), zap.String("url", req.RequestURI()))
-}
-
-// Interfaces to abstract http/http3 requests
 type ResponseWriter interface {
 	Header() Header
 	Write([]byte) (int, error)
@@ -95,8 +88,16 @@ type TlsInfo struct {
 }
 
 func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
-	// Initialize RequestMeta with proper IP unmapping (IPv4-in-IPv6 support)
+	// Cache interface calls and common components for performance
+	u := req.URL()
+	hdr := req.Header()
+	method := req.Method()
+	path := u.Path
+
+	// Address resolution and metadata initialization
 	addr, _ := getRemoteAddr(req, h.opts.SrcIPHeader)
+	// CAPTURE remoteAddr after potential SetRemoteAddr in getRemoteAddr for accurate logging
+	remoteAddr := req.GetRemoteAddr() 
 	meta := C.NewRequestMeta(addr)
 
 	if tlsInfo := req.TLS(); tlsInfo != nil {
@@ -114,14 +115,14 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 	}
 
 	// 1. Health check - Fast path
-	if h.opts.HealthPath != "" && req.URL().Path == h.opts.HealthPath {
+	if h.opts.HealthPath != "" && path == h.opts.HealthPath {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 		return
 	}
 
-	// 2. Path & Root validation - Anti-scanner redirection
-	if (len(h.opts.Path) != 0 && req.URL().Path != h.opts.Path) || req.URL().Path == "/" {
+	// 2. Path & Root validation
+	if (h.opts.Path != "" && path != h.opts.Path) || path == "/" {
 		if h.opts.RedirectURL != "" {
 			w.Header().Set("Location", h.opts.RedirectURL)
 			w.WriteHeader(http.StatusFound)
@@ -134,10 +135,10 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 	var b []byte
 	var err error
 
-	switch req.Method() {
+	switch method {
 	case http.MethodGet:
-		// 3. GET validation - RFC 8484 compliance
-		if !strings.Contains(req.Header().Get("Accept"), "application/dns-message") {
+		// RFC 8484 compliance: Check if Accept header contains the media type
+		if !strings.Contains(hdr.Get("Accept"), "application/dns-message") {
 			if h.opts.RedirectURL != "" {
 				w.Header().Set("Location", h.opts.RedirectURL)
 				w.WriteHeader(http.StatusFound)
@@ -147,13 +148,13 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 			return
 		}
 
-		s := req.URL().Query().Get("dns")
-		if len(s) == 0 {
+		// Use Query().Get() to ensure safe URL percent-encoding handling
+		s := u.Query().Get("dns")
+		if s == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
-		// Security: Pre-check decoded length to prevent oversized memory allocation
 		if base64.RawURLEncoding.DecodedLen(len(s)) > dns.MaxMsgSize {
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			return
@@ -162,18 +163,17 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 		b, err = base64.RawURLEncoding.DecodeString(s)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			h.warnErr(req, fmt.Errorf("decode base64 failed: %w", err))
+			h.opts.Logger.Warn("decode base64 failed", zap.String("from", remoteAddr), zap.Error(err))
 			return
 		}
 
 	case http.MethodPost:
-		// 4. POST validation - Strict RFC 8484
-		if contentType := req.Header().Get("Content-Type"); contentType != "application/dns-message" {
+		if hdr.Get("Content-Type") != "application/dns-message" {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
-		// FIX: Read up to MaxMsgSize+1 bytes using LimitReader.
+		// IMPORTANT: Read up to MaxMsgSize+1 bytes using LimitReader.
 		// Previously used pool.GetBuf(dns.MaxMsgSize+1) = 65537 bytes which
 		// exceeded the Allocator's max slab class, causing 30GB+ of allocations
 		// with zero pool reuse. DNS messages in practice are 50–4096 bytes,
@@ -193,43 +193,43 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 		return
 	}
 
-	// 5. DNS Processing
+	// DNS Processing
 	m := pool.GetMsg()
 	defer pool.ReleaseMsg(m)
 	if err := m.Unpack(b); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		h.warnErr(req, fmt.Errorf("unpack dns msg failed: %w", err))
+		h.opts.Logger.Warn("unpack dns msg failed", zap.String("from", remoteAddr), zap.Error(err))
 		return
 	}
 
 	r, err := h.opts.DNSHandler.ServeDNS(req.Context(), m, meta)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		h.warnErr(req, fmt.Errorf("dns handler error: %w", err))
+		h.opts.Logger.Warn("dns handler error", zap.String("from", remoteAddr), zap.Error(err))
 		return
 	}
 
-	// Use pool to pack response, reducing GC pressure
+	// Reduce GC pressure by using the message pool for packing the response
 	resBytes, buf, err := pool.PackBuffer(r)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		h.warnErr(req, fmt.Errorf("pack response failed: %w", err))
+		h.opts.Logger.Warn("pack response failed", zap.String("from", remoteAddr), zap.Error(err))
 		return
 	}
 	defer buf.Release()
 
-	// 6. Finalize Response
-	w.Header().Set("Content-Type", "application/dns-message")
-	w.Header().Set("Cache-Control", "max-age="+strconv.Itoa(int(dnsutils.GetMinimalTTL(r))))
+	// Finalize Response
+	respHdr := w.Header()
+	respHdr.Set("Content-Type", "application/dns-message")
+	respHdr.Set("Cache-Control", "max-age="+strconv.Itoa(int(dnsutils.GetMinimalTTL(r))))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resBytes)
 }
 
 func getRemoteAddr(req Request, customHeader string) (netip.Addr, error) {
-	// Priority check for common proxy headers using the static package-level slice
+	hdr := req.Header()
 	for _, h := range proxyHeaders {
-		if val := req.Header().Get(h); val != "" {
-			// Handle potential list in X-Forwarded-For (take first)
+		if val := hdr.Get(h); val != "" {
 			ipStr := val
 			if h == "X-Forwarded-For" {
 				ipStr, _, _ = strings.Cut(val, ",")
@@ -242,26 +242,15 @@ func getRemoteAddr(req Request, customHeader string) (netip.Addr, error) {
 		}
 	}
 
-	// Check custom header if provided and not already checked
 	if customHeader != "" {
-		isStandard := false
-		for _, h := range proxyHeaders {
-			if strings.EqualFold(customHeader, h) {
-				isStandard = true
-				break
-			}
-		}
-		if !isStandard {
-			if val := req.Header().Get(customHeader); val != "" {
-				if addr, err := netip.ParseAddr(val); err == nil {
-					req.SetRemoteAddr(val)
-					return addr, nil
-				}
+		if val := hdr.Get(customHeader); val != "" {
+			if addr, err := netip.ParseAddr(val); err == nil {
+				req.SetRemoteAddr(val)
+				return addr, nil
 			}
 		}
 	}
 
-	// Fallback to direct remote address
 	addrport, err := netip.ParseAddrPort(req.GetRemoteAddr())
 	if err != nil {
 		return netip.Addr{}, err
