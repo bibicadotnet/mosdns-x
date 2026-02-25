@@ -268,7 +268,7 @@ func NewUpstream(addr string, opt *Opt) (Upstream, error) {
 				}
 				return tlsConn, nil
 			},
-			TLSHandshakeTimeout:   7 * time.Second,
+			TLSHandshakeTimeout:   3 * time.Second,
 			ResponseHeaderTimeout: 10 * time.Second,
 			ExpectContinueTimeout: time.Second,
 			IdleConnTimeout:       idleConnTimeout,
