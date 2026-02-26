@@ -30,9 +30,6 @@ const (
 	// CRITICAL: protect against slow-read attacks (body + handler)
 	defaultReadTimeout = 10 * time.Second
 
-	// Response write timeout
-	defaultWriteTimeout = 10 * time.Second
-
 	// 2KB is sufficient for DoH (GET base64 + normal headers)
 	defaultMaxHeaderBytes = 2048
 )
@@ -53,7 +50,6 @@ func (s *Server) ServeHTTP(l net.Listener) error {
 		Handler:           &eHttpHandlerWrapper{s},
 		ReadHeaderTimeout: defaultReadHeaderTimeout,
 		ReadTimeout:       defaultReadTimeout,
-		WriteTimeout:      defaultWriteTimeout,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    defaultMaxHeaderBytes,
 	}
