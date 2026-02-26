@@ -50,6 +50,7 @@ func (m *Mosdns) startServers(cfg *ServerConfig) error {
 		BlockPTR:   cfg.BlockPTR,
 		BlockHTTPS: cfg.BlockHTTPS,
 		BlockNoDot: cfg.BlockNoDot,
+		StripEDNS0: cfg.StripEDNS0,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to init entry handler, %w", err)
