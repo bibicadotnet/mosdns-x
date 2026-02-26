@@ -1,7 +1,6 @@
 package server
 
 import (
-	"net/http"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -27,16 +26,6 @@ func (s *Server) ServeH3(l *quic.EarlyListener) error {
 		IdleTimeout:    idleTimeout,
 		MaxHeaderBytes: 4096,
 	}
-	if ok := s.trackCloser(hs, true); !ok {
-		return ErrServerClosed
-	}
-	defer s.trackCloser(hs, false)
 
-	err := hs.ServeListener(l)
-	if err == http.ErrServerClosed { // Replace http.ErrServerClosed with our ErrServerClosed
-		return ErrServerClosed
-	} else if err != nil {
-		return err
-	}
-	return nil
+	return hs.ServeListener(l)
 }

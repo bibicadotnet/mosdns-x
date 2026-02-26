@@ -53,19 +53,11 @@ func (s *Server) ServeTCP(l net.Listener) error {
 		return errMissingDNSHandler
 	}
 
-	if ok := s.trackCloser(l, true); !ok {
-		return ErrServerClosed
-	}
-	defer s.trackCloser(l, false)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	for {
 		c, err := l.Accept()
 		if err != nil {
-			if s.Closed() {
-				return ErrServerClosed
-			}
 			// Only continue if it's a net.Error timeout.
 			// Other fatal errors return to let the supervisor restart the process.
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
@@ -80,11 +72,6 @@ func (s *Server) ServeTCP(l net.Listener) error {
 
 func (s *Server) handleConnectionTcp(ctx context.Context, c *TCPConn) {
 	defer c.Close()
-
-	if !s.trackCloser(c, true) {
-		return
-	}
-	defer s.trackCloser(c, false)
 
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
@@ -135,8 +122,6 @@ func (s *Server) handleConnectionTcp(ctx context.Context, c *TCPConn) {
 }
 
 func (s *Server) handleQueryTcp(ctx context.Context, c *TCPConn, req *dns.Msg, meta *C.RequestMeta) {
-	s.wg.Add(1)
-	defer s.wg.Done()
 	defer pool.ReleaseMsg(req)
 
 	r, err := c.ServeDNS(ctx, req, meta)

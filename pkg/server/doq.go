@@ -60,11 +60,6 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 		return errMissingDNSHandler
 	}
 
-	if ok := s.trackCloser(l, true); !ok {
-		return ErrServerClosed
-	}
-	defer s.trackCloser(l, false)
-
 	firstReadTimeout := tcpFirstReadTimeout
 	idleTimeout := s.opts.IdleTimeout
 	if idleTimeout <= 0 {
@@ -79,9 +74,6 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 	for {
 		c, err := l.Accept(listenerCtx)
 		if err != nil {
-			if s.Closed() {
-				return ErrServerClosed
-			}
 			return fmt.Errorf("unexpected listener err: %w", err)
 		}
 
@@ -90,16 +82,11 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 		go func() {
 			defer closer.close(0)
 			defer cancelConn()
-			if !s.trackCloser(closer, true) {
-				closer.close(1)
-				return
-			}
 
 			clientAddr := utils.GetAddrFromAddr(c.RemoteAddr())
 			meta := C.NewRequestMeta(clientAddr)
 			meta.SetProtocol(C.ProtocolQUIC)
 			meta.SetServerName(c.ConnectionState().TLS.ServerName)
-			defer s.trackCloser(closer, false)
 
 			timeout := time.AfterFunc(firstReadTimeout, cancelConn)
 			for {
@@ -110,9 +97,7 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 					closer.close(1)
 					return
 				}
-				s.wg.Add(1)
 				go func() {
-					defer s.wg.Done()
 					defer stream.Close() // Close the stream when done
 
 					req := pool.GetMsg()

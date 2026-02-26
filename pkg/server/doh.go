@@ -58,14 +58,5 @@ func (s *Server) ServeHTTP(l net.Listener) error {
 		MaxHeaderBytes:    defaultMaxHeaderBytes,
 	}
 
-	if ok := s.trackCloser(hs, true); !ok {
-		return ErrServerClosed
-	}
-	defer s.trackCloser(hs, false)
-
-	err := hs.Serve(l)
-	if err == http.ErrServerClosed {
-		return ErrServerClosed
-	}
-	return err
+	return hs.Serve(l)
 }

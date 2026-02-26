@@ -2,8 +2,6 @@ package server
 
 import (
 	"errors"
-	"io"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -13,7 +11,6 @@ import (
 )
 
 var (
-	ErrServerClosed       = errors.New("server closed")
 	errMissingHTTPHandler = errors.New("missing http handler")
 	errMissingDNSHandler  = errors.New("missing dns handler")
 )
@@ -53,11 +50,6 @@ func (opts *ServerOpts) init() {
 
 type Server struct {
 	opts ServerOpts
-
-	m             sync.Mutex
-	closed        bool
-	closerTracker map[io.Closer]struct{}
-	wg            sync.WaitGroup
 }
 
 func NewServer(opts ServerOpts) *Server {
@@ -65,61 +57,4 @@ func NewServer(opts ServerOpts) *Server {
 	return &Server{
 		opts: opts,
 	}
-}
-
-// Closed returns true if server was closed.
-func (s *Server) Closed() bool {
-	s.m.Lock()
-	defer s.m.Unlock()
-	return s.closed
-}
-
-// trackCloser adds or removes c to the Server and return true if Server is not closed.
-func (s *Server) trackCloser(c io.Closer, add bool) bool {
-	s.m.Lock()
-	defer s.m.Unlock()
-
-	if s.closerTracker == nil {
-		s.closerTracker = make(map[io.Closer]struct{})
-	}
-
-	if add {
-		if s.closed {
-			return false
-		}
-		s.closerTracker[c] = struct{}{}
-	} else {
-		delete(s.closerTracker, c)
-	}
-	return true
-}
-
-// Close closes the Server and all its inner listeners.
-func (s *Server) Close() {
-	s.m.Lock()
-	if s.closed {
-		s.m.Unlock()
-		return
-	}
-
-	s.closed = true
-
-	// Copy all closers to a temporary slice to avoid holding the lock during Close() operations.
-	// This prevents potential deadlocks if a closer's Close method calls back into the server.
-	closers := make([]io.Closer, 0, len(s.closerTracker))
-	for c := range s.closerTracker {
-		closers = append(closers, c)
-	}
-
-	// Clear the tracker map and release the lock immediately.
-	s.closerTracker = nil
-	s.m.Unlock()
-
-	// Execute Close() on each tracker outside of the lock.
-	for _, c := range closers {
-		_ = c.Close()
-	}
-
-	// Wait for all server goroutines to exit.
-	s.wg.Wait()
 }

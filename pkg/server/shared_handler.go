@@ -17,8 +17,6 @@ type httpHandlerWrapper struct {
 }
 
 func (h *httpHandlerWrapper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.s.wg.Add(1)
-	defer h.s.wg.Done()
 	h.s.opts.HttpHandler.ServeHTTP(&responseWriterWrapper{w}, &requestWrapper{r})
 }
 
@@ -28,8 +26,6 @@ type eHttpHandlerWrapper struct {
 }
 
 func (h *eHttpHandlerWrapper) ServeHTTP(w eHttp.ResponseWriter, r *eHttp.Request) {
-	h.s.wg.Add(1)
-	defer h.s.wg.Done()
 	h.s.opts.HttpHandler.ServeHTTP(&eResponseWriterWrapper{w}, &eRequestWrapper{r})
 }
 
