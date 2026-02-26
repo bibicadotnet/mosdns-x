@@ -42,6 +42,7 @@ type ServerConfig struct {
 	BlockPTR   bool `yaml:"block_ptr"`
 	BlockHTTPS bool `yaml:"block_https"`
 	BlockNoDot bool `yaml:"block_no_dot"`
+	StripEDNS0 bool `yaml:"strip_edns0"`
 }
 
 type ServerListenerConfig struct {
