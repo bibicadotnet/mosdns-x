@@ -16,10 +16,6 @@ For features, configuration guides, and tutorials, visit the [Wiki](https://gith
 
 ---
 
-### New Features and Enhancements
-
-Here is the English translation of the release notes, maintaining the exact same structure, punctuation, and capitalization rules (no capitalization after colons) as requested:
-
 ### Platform upgrade
 
 * Update Go and all dependencies to the latest versions to improve performance, security, and stability.
