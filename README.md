@@ -18,21 +18,72 @@ For features, configuration guides, and tutorials, visit the [Wiki](https://gith
 
 ### New Features and Enhancements
 
-**Resilience (Connection & Performance)**
+Here is the English translation of the release notes, maintaining the exact same structure, punctuation, and capitalization rules (no capitalization after colons) as requested:
 
-* Improved reconnection speed after server restarts for all encrypted DNS protocols.
-* **DoH3/DoQ:** Reconnection time reduced from 3-5 seconds to under 100ms.
-* **DoH/DoT:** Reconnection time reduced from 500-700ms to 200-300ms.
-* Persistent session keys stored in `key/.mosdns_stateless_reset.key` enable 0-RTT and TLS Session Resumption across restarts.
-* Added a `/health` endpoint for lightweight uptime monitoring.
-* Added `NXDOMAIN` (non-existent domain) caching support.
+### Platform upgrade
 
-**Privacy and Security**
+* Update Go and all dependencies to the latest versions to improve performance, security, and stability.
 
-* Disabled client IP logging to ensure user anonymity, even when logs are active.
-* Added `allowed_sni` validation to filter unauthorized scanners and bots during the TLS handshake. Blocked requests are excluded from logs.
-* Automated redirection of non-DNS traffic (any path other than `/dns-query`) to a custom landing page.
-* DNS responses limited to a maximum of 2 IP addresses per query to reduce payload overhead.
+### Server
+
+* **Native processing at the server level**: pre-processing steps are now performed directly at the server instead of through plugins:
+  * Strip EDNS0
+  * Block ANY / AAAA / PTR / HTTPS
+  * Domain validation
+  * Lowercase conversion
+
+* **Efficiency**: server-level processing reduces overhead by eliminating the need to create contexts for plugins, minimizing intermediate steps and decreasing overall latency.
+* **Configuration options**: added options to filter queries at the earliest stage:
+  * `block_aaaa`: false
+  * `block_ptr`: true
+  * `block_https`: true
+  * `block_no_dot`: true
+  * `strip_edns0`: true
+
+* **Protocols**: all protocols including TCP, UDP, DoH, DoH3, DoT, and DoQ have been adjusted and optimized, focusing on performance and stability.
+* **Health check and redirect**:
+  * Add `health_path` to provide an endpoint for monitoring uptime.
+  * Add `redirect_url`: automatically redirect non-DNS requests (excluding `health_path` and `/dns-query`) to a custom URL.
+
+* **Security and privacy**:
+  * `allowed_sni` inspects the SNI during the TLS handshake to filter unauthorized bots and scanners. blocked requests are excluded from logs.
+  * The system has completely disabled client IP logging to ensure anonymity, even when logging is enabled.
+
+### SSL
+
+* **Connection speed**: improved reconnection capability after server restarts. keys are stored at `key/.mosdns_stateless_reset.key` to support 0-RTT and TLS session resumption.
+* **Encryption algorithms**: utilize X25519 and ECDSA (P-256). this solution consumes less CPU and generates much smaller certificates compared to Post-Quantum (ML-KEM/Kyber).
+* **Compression and packet optimization**:
+  * Support certificate compression using Brotli if the client supports it.
+  * Compress DNS packets before sending them to the client.
+  * For DoH and DoT, packet sizes are typically under 1252 bytes (below the MTU limit), so most only require a single packet, theoretically increasing speed (DoH3 and DoQ do not utilize this due to `quic-go` dependencies).
+
+### Cache
+
+* **Uint64 hashing**: use `GetMsgHash` to create 8-byte cache keys for faster lookups.
+* **Pre-allocated memory**: the entire map is pre-allocated at startup based on the `size` parameter. it does not expand during runtime, ensuring stable RAM usage.
+* **Zero allocation path**: when the `size` limit is reached, the system reuses existing elements instead of allocating new ones. this mechanism eliminates GC overhead and prevents RAM spikes under high traffic.
+* **Lazy cache**: streamlined internal logic and removed redundant processing.
+* **New options**: add `cleaner_interval` to customize cache key cleanup timing. support NXDOMAIN caching.
+* **Data structure optimization**: improved `concurrent_lru`, `list`, and `lru` for more efficient cache storage and deletion in concurrent environments.
+
+### ECS
+
+* **Operational mechanism**: ECS is only processed at the location of the `ecs` plugin in the `.yaml` file. there is no longer a default global caching mechanism.
+* **ECS normalization**: IPs in the same range (e.g., 1.2.3.4 and 1.2.3.5) are unified to `1.2.3.0/24` to ensure cache accuracy and prevent fragmentation.
+
+### Upstream and Matcher
+
+* **Upstream**: defaults to parallel logic and is optimized for DoH and DoT.
+* **Matcher**: `response_matcher` and `query_matcher` have been rewritten for better processing efficiency.
+
+### Plugin
+
+* **General modifications**: most plugins have removed validation steps since they are now handled at the server level, reducing overall system latency.
+* **Redirect**: removes CNAME but keeps A/AAAA according to the original query name, consistent with `_no_cname` logic.
+* **Limit_ip**: limits the DNS response to a maximum of 2 IP addresses per query.
+* **Dynamic_domain_collector**: automatically reads and writes domains to a file.
+* **Query_summary**: disables client IP logging and limits logging of minor errors at the info level.
 
 ---
 
