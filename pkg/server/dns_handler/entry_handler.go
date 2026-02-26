@@ -1,215 +1,105 @@
-package dns_handler
+package coremain
 
 import (
-	"context"
-	"errors"
-	"strings"
-	"time"
-
-	"github.com/miekg/dns"
-	"go.uber.org/zap"
-
-	"github.com/pmkol/mosdns-x/pkg/executable_seq"
-	"github.com/pmkol/mosdns-x/pkg/query_context"
+	"github.com/pmkol/mosdns-x/mlog"
+	"github.com/pmkol/mosdns-x/pkg/data_provider"
 	"github.com/pmkol/mosdns-x/pkg/utils"
 )
 
-const (
-	defaultQueryTimeout = time.Second * 5
-)
+type Config struct {
+	Log           mlog.LogConfig                     `yaml:"log"`
+	Include       []string                           `yaml:"include"`
+	DataProviders []data_provider.DataProviderConfig `yaml:"data_providers"`
+	Plugins       []PluginConfig                     `yaml:"plugins"`
+	Servers       []ServerConfig                     `yaml:"servers"`
+	API           APIConfig                          `yaml:"api"`
 
-var nopLogger = zap.NewNop()
-
-type Handler interface {
-	ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error)
+	// Experimental
+	Security SecurityConfig `yaml:"security"`
 }
 
-type EntryHandlerOpts struct {
-	Logger             *zap.Logger
-	Entry              executable_seq.Executable
-	QueryTimeout       time.Duration
-	RecursionAvailable bool
+// PluginConfig represents a plugin config
+type PluginConfig struct {
+	// Tag, required
+	Tag string `yaml:"tag"`
 
-	// New optional features for early blocking
-	BlockAAAA   bool
-	BlockPTR    bool
-	BlockHTTPS  bool
-	BlockNoDot  bool
+	// Type, required
+	Type string `yaml:"type"`
+
+	// Args, might be required by some plugins.
+	// The type of Args is depended on RegNewPluginFunc.
+	// If it's a map[string]interface{}, it will be converted by mapstruct.
+	Args interface{} `yaml:"args"`
 }
 
-func (opts *EntryHandlerOpts) Init() error {
-	if opts.Logger == nil {
-		opts.Logger = nopLogger
-	}
-	if opts.Entry == nil {
-		return errors.New("nil entry")
-	}
-	utils.SetDefaultNum(&opts.QueryTimeout, defaultQueryTimeout)
-	return nil
+type ServerConfig struct {
+	Exec      string                  `yaml:"exec"`
+	Timeout   uint                    `yaml:"timeout"` // (sec) query timeout.
+	Listeners []*ServerListenerConfig `yaml:"listeners"`
+
+	// Early blocking options
+	BlockAAAA  bool `yaml:"block_aaaa"`
+	BlockPTR   bool `yaml:"block_ptr"`
+	BlockHTTPS bool `yaml:"block_https"`
+	BlockNoDot bool `yaml:"block_no_dot"`
+	StripEDNS0 bool `yaml:"strip_edns0"`
 }
 
-type EntryHandler struct {
-	opts EntryHandlerOpts
+type ServerListenerConfig struct {
+	// Protocol: server protocol, can be:
+	// "", "udp" -> udp
+	// "tcp" -> tcp
+	// "dot", "tls" -> dns over tls
+	// "doh", "https" -> dns over https (rfc 8844)
+	// "http" -> dns over https (rfc 8844) but without tls
+	// "doq", "quic" -> dns over quic (rfc 9250)
+	// "doh3", "h3" -> dns over http3 (rfc 9114 && rfc 8844)
+	Protocol string `yaml:"protocol"`
+
+	// Addr: server "host:port" addr.
+	// When uds enabled must be "path"
+	// Addr cannot be empty.
+	Addr string `yaml:"addr"`
+
+	// UnixDomainSocket: server addr is uds.
+	UnixDomainSocket bool `yaml:"uds"`
+
+	Cert                string `yaml:"cert"`                    // certificate path, used by dot, doh, doq
+	Key                 string `yaml:"key"`                     // certificate key path, used by dot, doh, doq
+	KernelTX            bool   `yaml:"kernel_tx"`                // use kernel tls to send data
+	KernelRX            bool   `yaml:"kernel_rx"`                // use kernel tls to receive data
+	URLPath             string `yaml:"url_path"`                 // used by doh, http. If it's empty, any path will be handled.
+	HealthPath          string `yaml:"health_path"`              // health check endpoint path
+	RedirectURL         string `yaml:"redirect_url"`             // redirect URL for non-DNS paths
+	GetUserIPFromHeader string `yaml:"get_user_ip_from_header"` // used by doh, http, except "True-Client-IP" "X-Real-IP" "X-Forwarded-For".
+	ProxyProtocol       bool   `yaml:"proxy_protocol"`           // accepting the PROXYProtocol
+
+	IdleTimeout uint `yaml:"idle_timeout"` // (sec) used by tcp, dot, doh as connection idle timeout.
+	AllowedSNI  string `yaml:"allowed_sni"` // 只允许指定的SNI访问
 }
 
-func NewEntryHandler(opts EntryHandlerOpts) (Handler, error) {
-	if err := opts.Init(); err != nil {
-		return nil, err
-	}
-	return &EntryHandler{opts: opts}, nil
+type APIConfig struct {
+	HTTP string `yaml:"http"`
 }
 
-func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error) {
-	// 1. Context & Deadline Setup
-	qCtx := ctx
-	cancel := func() {}
-
-	ddl := time.Now().Add(h.opts.QueryTimeout)
-	if d, ok := ctx.Deadline(); !ok || d.After(ddl) {
-		qCtx, cancel = context.WithDeadline(ctx, ddl)
-	}
-	defer cancel()
-
-	// 2. Optimized Structural & Protocol Validation
-	if len(req.Question) != 1 {
-		h.opts.Logger.Debug("refused: invalid question count", zap.Uint16("id", req.Id))
-		return h.responseRefused(req), nil
-	}
-
-	if req.Opcode != dns.OpcodeQuery {
-		h.opts.Logger.Debug("refused: unusual opcode", zap.Uint16("id", req.Id))
-		return h.responseRefused(req), nil
-	}
-
-	// 3. RFC 8482 & Early Noise Filtering
-	q := req.Question[0]
-
-	// Block ANY Queries Early (RFC 8482)
-	if q.Qtype == dns.TypeANY {
-		h.opts.Logger.Debug("blocked: ANY query (RFC 8482)", zap.Uint16("id", req.Id))
-		r := new(dns.Msg)
-		r.SetReply(req)
-		r.Answer = []dns.RR{&dns.HINFO{
-			Hdr: dns.RR_Header{
-				Name:   q.Name,
-				Rrtype: dns.TypeHINFO,
-				Class:  dns.ClassINET,
-				Ttl:    8482,
-			},
-			Cpu: "ANY obsoleted",
-			Os:  "See RFC 8482",
-		}}
-		if h.opts.RecursionAvailable {
-			r.RecursionAvailable = true
-		}
-		return r, nil
-	}
-
-	// Early Noise Filtering based on options
-	if (h.opts.BlockAAAA && q.Qtype == dns.TypeAAAA) ||
-		(h.opts.BlockPTR && q.Qtype == dns.TypePTR) ||
-		(h.opts.BlockHTTPS && q.Qtype == dns.TypeHTTPS) {
-		r := new(dns.Msg)
-		r.SetRcode(req, dns.RcodeSuccess)
-		if h.opts.RecursionAvailable {
-			r.RecursionAvailable = true
-		}
-		return r, nil
-	}
-
-	// 4. Domain Validation & Lowercase Check (Single Pass)
-	name := q.Name
-	hasDot := false
-	hasUpper := false
-
-	// Skip the last root dot to check for valid TLD structure
-	for i := 0; i < len(name)-1; i++ {
-		c := name[i]
-		if c == '.' {
-			hasDot = true
-		} else if c >= 'A' && c <= 'Z' {
-			hasUpper = true
-		}
-	}
-
-	// Optional check for missing dot separator (e.g., "localhost.")
-	if h.opts.BlockNoDot && !hasDot {
-		return h.responseNXDomain(req), nil
-	}
-
-	// Only perform allocation if uppercase characters were detected
-	if hasUpper {
-		req.Question[0].Name = strings.ToLower(name)
-	}
-
-	// 5. Final Hygiene Checks
-	if q.Qclass != dns.ClassINET {
-		h.opts.Logger.Debug("refused: unsupported qclass", zap.Uint16("id", req.Id))
-		return h.responseRefused(req), nil
-	}
-
-	if req.Response || req.Authoritative || req.Truncated ||
-		req.RecursionAvailable || req.Zero || len(req.Answer) != 0 || len(req.Ns) != 0 {
-		h.opts.Logger.Debug("refused: malformed header flags or sections", zap.Uint16("id", req.Id))
-		return h.responseRefused(req), nil
-	}
-
-	// 6. Execution Flow
-	origID := req.Id
-	queryCtx := query_context.NewContext(req, meta)
-
-	err := h.opts.Entry.Exec(qCtx, queryCtx, nil)
-	respMsg := queryCtx.R()
-
-	// 7. Logging
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			h.opts.Logger.Debug("query interrupted", queryCtx.InfoField(), zap.Error(err))
-		} else {
-			h.opts.Logger.Warn("entry returned an err", queryCtx.InfoField(), zap.Error(err))
-		}
-	}
-
-	// 8. Response Finalization
-	if respMsg == nil {
-		if err == nil {
-			h.opts.Logger.Error("entry returned with nil response", queryCtx.InfoField())
-		}
-
-		respMsg = new(dns.Msg)
-		respMsg.SetReply(req)
-
-		if err != nil {
-			respMsg.Rcode = dns.RcodeServerFailure
-		} else {
-			respMsg.Rcode = dns.RcodeRefused
-		}
-	}
-
-	if h.opts.RecursionAvailable {
-		respMsg.RecursionAvailable = true
-	}
-	respMsg.Id = origID
-
-	return respMsg, nil
+type SecurityConfig struct {
+	BadIPObserver BadIPObserverConfig `yaml:"bad_ip_observer"`
 }
 
-func (h *EntryHandler) responseRefused(req *dns.Msg) *dns.Msg {
-	res := new(dns.Msg)
-	res.SetReply(req)
-	res.Rcode = dns.RcodeRefused
-	if h.opts.RecursionAvailable {
-		res.RecursionAvailable = true
-	}
-	return res
+// BadIPObserverConfig is a copy of ip_observer.BadIPObserverOpts.
+type BadIPObserverConfig struct {
+	Threshold        int    `yaml:"threshold"` // Zero Threshold will disable the bad ip observer.
+	Interval         int    `yaml:"interval"`  // (sec) Default is 10.
+	TTL              int    `yaml:"ttl"`       // (sec) Default is 600 (10min).
+	OnUpdateCallBack string `yaml:"on_update_callback"`
+	// IP masks to aggregate an IP range.
+	IPv4Mask int `yaml:"ipv4_mask"` // Default is 32.
+	IPv6Mask int `yaml:"ipv6_mask"` // Default is 48.
 }
 
-func (h *EntryHandler) responseNXDomain(req *dns.Msg) *dns.Msg {
-	res := new(dns.Msg)
-	res.SetReply(req)
-	res.Rcode = dns.RcodeNameError
-	if h.opts.RecursionAvailable {
-		res.RecursionAvailable = true
-	}
-	return res
+func (c *BadIPObserverConfig) Init() {
+	utils.SetDefaultNum(&c.Interval, 10)
+	utils.SetDefaultNum(&c.TTL, 600)
+	utils.SetDefaultNum(&c.IPv4Mask, 32)
+	utils.SetDefaultNum(&c.IPv6Mask, 48)
 }
