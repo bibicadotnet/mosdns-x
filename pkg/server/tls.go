@@ -219,8 +219,9 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 	}
 
 	tr := &quic.Transport{
-		Conn:              conn,
-		StatelessResetKey: statelessResetKey,
+	    Conn:                              conn,
+	    StatelessResetKey:                 statelessResetKey,
+	    DisableVersionNegotiationPackets:  true,
 	}
 
 	return tr.ListenEarly(&tls.Config{
@@ -247,6 +248,7 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 	}, &quic.Config{
 	    MaxIdleTimeout:                 s.opts.IdleTimeout,
 	    Allow0RTT:                      true,
+	    DisablePathMTUDiscovery:        true,
 	    InitialStreamReceiveWindow:     1252,
 	    MaxStreamReceiveWindow:         4 * 1024,
 	    InitialConnectionReceiveWindow: 8 * 1024,
