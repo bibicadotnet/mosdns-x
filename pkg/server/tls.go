@@ -227,7 +227,6 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 		NextProtos:       nextProtos,
 		SessionTicketKey: tlsSessionTicketKey,
 
-		// Restrict curves to disable heavy Post-Quantum algorithms (ML-KEM) and reduce CPU usage
 		CurvePreferences: []tls.CurveID{
 			tls.X25519,
 			tls.CurveP256,
@@ -239,7 +238,6 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 				return nil, errors.New("certificate not available")
 			}
 
-			// SNI filtering with silent fallback
 			if allowedSNI != "" && chi.ServerName != "" && chi.ServerName != allowedSNI {
 				return nil, errors.New("invalid sni")
 			}
@@ -247,6 +245,7 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 			return cert, nil
 		},
 	}, &quic.Config{
+		MaxIdleTimeout:                 s.opts.IdleTimeout, // delegate idle timeout to quic-go
 		Allow0RTT:                      true,
 		InitialStreamReceiveWindow:     1252,
 		MaxStreamReceiveWindow:         4 * 1024,
