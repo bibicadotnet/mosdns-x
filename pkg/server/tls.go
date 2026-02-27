@@ -247,10 +247,10 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 	}, &quic.Config{
 	    MaxIdleTimeout:                 s.opts.IdleTimeout,
 	    Allow0RTT:                      true,
-	    InitialStreamReceiveWindow:     4 * 1024,   // 1252 → 4KB
-	    MaxStreamReceiveWindow:         16 * 1024,  // 4KB  → 16KB
-	    InitialConnectionReceiveWindow: 16 * 1024,  // 8KB  → 16KB
-	    MaxConnectionReceiveWindow:     64 * 1024,  // 16KB → 64KB
+	    InitialStreamReceiveWindow:     1252,
+	    MaxStreamReceiveWindow:         4 * 1024,
+	    InitialConnectionReceiveWindow: 8 * 1024,
+	    MaxConnectionReceiveWindow:     16 * 1024,
 	})
 }
 
