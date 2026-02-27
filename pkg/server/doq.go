@@ -61,9 +61,16 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 			meta.SetProtocol(C.ProtocolQUIC)
 			meta.SetServerName(c.ConnectionState().TLS.ServerName)
 
+			// Idle timeout và first-read timeout được quản lý hoàn toàn bởi
+			// quic-go qua MaxIdleTimeout trong quic.Config (cấu hình ở tls.go).
+			// Không cần timer thủ công ở đây.
+
 			for {
 				stream, err := c.AcceptStream(quicConnCtx)
 				if err != nil {
+					if quicConnCtx.Err() != nil {
+						return
+					}
 					closer.close(1)
 					return
 				}
