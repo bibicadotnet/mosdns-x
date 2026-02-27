@@ -67,24 +67,12 @@ func (r *eRequestWrapper) SetRemoteAddr(addr string) { r.r.RemoteAddr = addr }
 // ResponseWriter wrappers
 type responseWriterWrapper struct{ w http.ResponseWriter }
 
-func (w *responseWriterWrapper) Header() H.Header { return w.w.Header() }
-func (w *responseWriterWrapper) Write(b []byte) (int, error) {
-	n, err := w.w.Write(b)
-	if f, ok := w.w.(http.Flusher); ok {
-		f.Flush()
-	}
-	return n, err
-}
-func (w *responseWriterWrapper) WriteHeader(code int) { w.w.WriteHeader(code) }
+func (w *responseWriterWrapper) Header() H.Header            { return w.w.Header() }
+func (w *responseWriterWrapper) Write(b []byte) (int, error) { return w.w.Write(b) }
+func (w *responseWriterWrapper) WriteHeader(code int)        { w.w.WriteHeader(code) }
 
 type eResponseWriterWrapper struct{ w eHttp.ResponseWriter }
 
-func (w *eResponseWriterWrapper) Header() H.Header { return w.w.Header() }
-func (w *eResponseWriterWrapper) Write(b []byte) (int, error) {
-	n, err := w.w.Write(b)
-	if f, ok := w.w.(eHttp.Flusher); ok {
-		f.Flush()
-	}
-	return n, err
-}
-func (w *eResponseWriterWrapper) WriteHeader(code int) { w.w.WriteHeader(code) }
+func (w *eResponseWriterWrapper) Header() H.Header            { return w.w.Header() }
+func (w *eResponseWriterWrapper) Write(b []byte) (int, error) { return w.w.Write(b) }
+func (w *eResponseWriterWrapper) WriteHeader(code int)        { w.w.WriteHeader(code) }
