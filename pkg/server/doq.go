@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package server
 
 import (
@@ -24,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
+	"sync/atomic"
 
 	"github.com/quic-go/quic-go"
 	"go.uber.org/zap"
@@ -36,7 +17,7 @@ import (
 )
 
 type quicCloser struct {
-	closed bool
+	closed atomic.Bool
 	conn   *quic.Conn
 }
 
@@ -45,10 +26,9 @@ func (c *quicCloser) Close() error {
 }
 
 func (c *quicCloser) close(code quic.ApplicationErrorCode) error {
-	if c.closed {
+	if !c.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	c.closed = true
 	return c.conn.CloseWithError(code, "")
 }
 
@@ -60,17 +40,9 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 		return errMissingDNSHandler
 	}
 
-	firstReadTimeout := tcpFirstReadTimeout
-	idleTimeout := s.opts.IdleTimeout
-	if idleTimeout <= 0 {
-		idleTimeout = defaultQUICIdleTimeout
-	}
-	if idleTimeout < firstReadTimeout {
-		firstReadTimeout = idleTimeout
-	}
-
 	listenerCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
 	for {
 		c, err := l.Accept(listenerCtx)
 		if err != nil {
@@ -79,6 +51,7 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 
 		quicConnCtx, cancelConn := context.WithCancel(listenerCtx)
 		closer := &quicCloser{conn: c}
+
 		go func() {
 			defer closer.close(0)
 			defer cancelConn()
@@ -88,32 +61,34 @@ func (s *Server) ServeQUIC(l *quic.EarlyListener) error {
 			meta.SetProtocol(C.ProtocolQUIC)
 			meta.SetServerName(c.ConnectionState().TLS.ServerName)
 
-			timeout := time.AfterFunc(firstReadTimeout, cancelConn)
 			for {
 				stream, err := c.AcceptStream(quicConnCtx)
 				if err != nil {
-					// If AcceptStream fails, the connection is likely in a bad state or closed.
-					// Close the quic connection with an error code.
 					closer.close(1)
 					return
 				}
+
 				go func() {
-					defer stream.Close() // Close the stream when done
+					readDone := false
+					defer func() {
+						if !readDone {
+							stream.CancelRead(0)
+						}
+					}()
+					defer stream.Close()
 
 					req := pool.GetMsg()
 					defer pool.ReleaseMsg(req)
 
-					timeout.Reset(idleTimeout)                     // Move reset before read
-					_, err := dnsutils.ReadMsgFromTCP(stream, req) // Update call signature
+					_, err := dnsutils.ReadMsgFromTCP(stream, req)
 					if err != nil {
 						stream.CancelRead(1)
 						stream.CancelWrite(1)
-						// If reading from stream fails, it's a stream-level error, not necessarily connection-level.
-						// No need to close the entire quic connection here.
+						readDone = true
 						return
 					}
 
-					stream.CancelRead(0) // Successfully read, cancel read with no error
+					readDone = true
 
 					if req.Id != 0 {
 						stream.CancelWrite(1)
