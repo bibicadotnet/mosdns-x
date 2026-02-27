@@ -221,7 +221,6 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 	tr := &quic.Transport{
 	    Conn:                              conn,
 	    StatelessResetKey:                 statelessResetKey,
-	    DisableVersionNegotiationPackets:  true,
 	}
 
 	return tr.ListenEarly(&tls.Config{
