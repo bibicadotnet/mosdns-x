@@ -60,40 +60,22 @@ func (u *Upstream) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, e
 		return nil, fmt.Errorf("invalid content-type: %s", ct)
 	}
 
-	// Use 4KB buffer from pool (matches DNS workload optimization in allocator).
-	// DNS responses are typically 50-4096 bytes, well within this shard.
-	bb := pool.GetBuf(4096)
-	defer bb.Release()
-
-	// Read response into pooled buffer
-	buf2 := bb.AllBytes()
-	var total int
-	for total < len(buf2) {
-		n, err := res.Body.Read(buf2[total:])
-		total += n
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
+	// Use runtime allocator instead of pool for better memory efficiency.
+	// DNS responses are typically 50-4096 bytes, well within runtime's
+	// efficient allocation range.
+	respBytes, err := io.ReadAll(io.LimitReader(res.Body, 4097))
+	if err != nil {
+		return nil, err
 	}
-
-	// Check for overflow - if buffer is full, ensure no more data exists
-	if total == 4096 {
-		oneByte := make([]byte, 1)
-		n, _ := res.Body.Read(oneByte)
-		if n > 0 {
-			return nil, fmt.Errorf("response exceeds maximum size of 4096 bytes")
-		}
+	if len(respBytes) > 4096 {
+		return nil, fmt.Errorf("response too large: %d bytes", len(respBytes))
 	}
-
-	if total == 0 {
+	if len(respBytes) == 0 {
 		return nil, fmt.Errorf("empty response")
 	}
 
 	r := new(dns.Msg)
-	if err := r.Unpack(buf2[:total]); err != nil {
+	if err := r.Unpack(respBytes); err != nil {
 		return nil, err
 	}
 	return r, nil
