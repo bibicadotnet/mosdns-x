@@ -15,73 +15,51 @@ This version is a fork based on [pmkol/mosdns-x](https://github.com/pmkol/mosdns
 For features, configuration guides, and tutorials, visit the [Wiki](https://github.com/pmkol/mosdns-x/wiki).
 
 ---
+### Changelog & Updates
 
-### Platform upgrade
-
-* Update Go and all dependencies to the latest versions to improve performance, security, and stability.
-
-### Server
-
-* **Native processing at the server level**: pre-processing steps are now performed directly at the server instead of through plugins:
-  * Strip EDNS0
-  * Block ANY / AAAA / PTR / HTTPS
-  * Domain validation
-  * Lowercase conversion
-
-* **Efficiency**: server-level processing reduces overhead by eliminating the need to create contexts for plugins, minimizing intermediate steps and decreasing overall latency.
-* **Configuration options**: added options to filter queries at the earliest stage:
-  * `block_aaaa`: false
-  * `block_ptr`: true
-  * `block_https`: true
-  * `block_no_dot`: true
-  * `strip_edns0`: true
-
-* **Protocols**: all protocols including TCP, UDP, DoH, DoH3, DoT, and DoQ have been adjusted and optimized, focusing on performance and stability.
-* **Health check and redirect**:
-  * Add `health_path` to provide an endpoint for monitoring uptime.
-  * Add `redirect_url`: automatically redirect non-DNS requests (excluding `health_path` and `/dns-query`) to a custom URL.
-
-* **Security and privacy**:
-  * `allowed_sni` inspects the SNI during the TLS handshake to filter unauthorized bots and scanners. blocked requests are excluded from logs.
-  * The system has completely disabled client IP logging to ensure anonymity, even when logging is enabled.
-
-### SSL
-
-* **Connection speed**: improved reconnection capability after server restarts. keys are stored at `key/.mosdns_stateless_reset.key` to support 0-RTT and TLS session resumption.
-* **Encryption algorithms**: utilize X25519 and ECDSA (P-256). this solution consumes less CPU and generates much smaller certificates compared to Post-Quantum (ML-KEM/Kyber).
-* **Compression and packet optimization**:
-  * Support certificate compression using Brotli if the client supports it.
-  * Compress DNS packets before sending them to the client.
-
-### Cache
-
-* **Uint64 hashing**: use `GetMsgHash` to create 8-byte cache keys for faster lookups.
-* **Pre-allocated memory**: the entire map is pre-allocated at startup based on the `size` parameter. it does not expand during runtime, ensuring stable RAM usage.
-* **Zero allocation path**: when the `size` limit is reached, the system reuses existing elements instead of allocating new ones. this mechanism eliminates GC overhead and prevents RAM spikes under high traffic.
-* **Lazy cache**: streamlined internal logic and removed redundant processing.
-* **New options**: add `cleaner_interval` to customize cache key cleanup timing. support NXDOMAIN caching.
-* **Data structure optimization**: improved `concurrent_lru`, `list`, and `lru` for more efficient cache storage and deletion in concurrent environments.
-
-### ECS
-
-* **Operational mechanism**: ECS is only processed at the location of the `ecs` plugin in the `.yaml` file. there is no longer a default global caching mechanism.
-* **ECS normalization**: IPs in the same range (e.g., 1.2.3.4 and 1.2.3.5) are unified to `1.2.3.0/24` to ensure cache accuracy and prevent fragmentation.
-
-### Upstream and Matcher
-
-* **Upstream**: defaults to parallel logic and is optimized for DoH and DoT.
-* **Matcher**: `response_matcher` and `query_matcher` have been rewritten for better processing efficiency.
-
-### Plugin
-
-* **General modifications**: most plugins have removed validation steps since they are now handled at the server level, reducing overall system latency.
-* **Redirect**: removes CNAME but keeps A/AAAA according to the original query name, consistent with `_no_cname` logic.
-* **Limit_ip**: limits the DNS response to a maximum of 2 IP addresses per query.
-* **Dynamic_domain_collector**: automatically reads and writes domains to a file.
-* **Query_summary**: disables client IP logging and limits logging of minor errors at the info level.
-
+* Updated Go and dependencies to the latest versions.
+* **Added _DNS_ checks, sanitization, and server-side toggles to reduce overhead by eliminating the need for plugin contexts. This is a critical change: validation happens once at the entry, so subsequent plugins no longer need to re-validate.**
+    * ANY queries are always blocked; exactly 1 question required; Opcode = QUERY; Qclass = INET; header must be a pure query.
+    * Automatic domain lowercase conversion.
+    * Block IPv6 AAAA queries (if `block_aaaa` is enabled).
+    * Block PTR reverse queries (if `block_ptr` is enabled).
+    * Block HTTPS queries (if `block_https` is enabled).
+    * Block domains without dots, e.g., localhost (if `block_no_dot` is enabled).
+    * Strip EDNS extensions (if `strip_edns0` is enabled).
+* TCP, UDP, DoH, DoH3, DoT, and DoQ protocols have been refined and optimized, focusing on bug fixes, performance, and stability.
+* **Health check and redirect:**
+    * Added `health_path` to provide an operational status endpoint.
+    * Added `redirect_url` to automatically redirect non-DNS requests (except `health_path` and `/dns-query`) to a custom URL.
+* **Security and Privacy:**
+    * `allowed_sni` validates SNI during the TLS handshake to filter bots and unauthorized scanners; blocked requests are not logged.
+    * Completely disabled client IP logging to ensure anonymity, even when logging is turned on.
+* **SSL:**
+    * Connection speed: improved reconnection after server restarts; keys are stored in the `key` directory to support 0-RTT and TLS session resumption.
+    * Encryption algorithms: uses X25519 and ECDSA (P-256), consuming less CPU and producing smaller certificates compared to Post-Quantum (ML-KEM/Kyber).
+    * Supports Brotli certificate compression if the client supports it (DoH/DoT only).
+    * More accurate `certFile` and `keyFile` checks during renewal.
+* Compress DNS packets before sending to clients via `msg_buf`.
+* **_Cache_: Major changes from original mosdns-x; `cache_everything` is deprecated in favor of pipeline management. _ECS_ is only processed at the specific _ecs_ plugin location in the YAML.**
+    * Uses `GetMsgHash` to create 8-byte cache keys (uint64 hashing), which are smaller and faster.
+    * All maps are pre-allocated based on the `size` parameter in the config and do not expand during runtime, keeping RAM usage stable.
+    * When the size limit is reached, the system reuses old elements instead of allocating new ones; this mechanism eliminates GC overhead and prevents RAM spikes during high traffic.
+    * Lazy cache: rewritten to be simpler, removing redundant processing.
+    * Added `cleaner_interval` to allow custom cache key cleanup timing.
+    * Supports `NXDOMAIN` caching.
+    * Optimized `concurrent_lru`, `list`, and `lru` for more efficient cache storage and deletion.
+* **_ECS_**:
+    * **_ECS_** Normalization: IPs in the same range like `1.2.3.4` and `1.2.3.5` are converged to `1.2.3.0/24`, ensuring accurate cache hits.
+* **Upstream:**
+    * Runs in `parallel` when $\ge 2$ upstreams are present.
+    * Uses X25519 and ECDSA (P-256), consuming less CPU and producing smaller certificates so it's lighter than Post-Quantum (ML-KEM/Kyber).
+* **Matcher:**
+    * `response_matcher` and `query_matcher` heavily rewritten for higher processing efficiency.
+* **Plugin:** Most plugins have removed validation logic as it's now handled at the server level, reducing overall system latency.
+    * `redirect`: removes CNAME but keeps A/AAAA records matching the original query name, synced with the `_no_cname` plugin.
+    * `limit_ip`: limits each DNS response to a maximum of 2 IP addresses.
+    * `dynamic_domain_collector`: automatically reads and writes domains to files.
+    * `query_summary`: disables client IP logging and limits minor errors to info level.
 ---
-
 ### Community and Resources
 
 * **Telegram:** [Mosdns-x Group](https://t.me/mosdns)
