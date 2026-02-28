@@ -148,8 +148,8 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 			return
 		}
 
-		// Use Query().Get() to ensure safe URL percent-encoding handling
-		s := u.Query().Get("dns")
+        // Manually parse RawQuery to avoid url.ParseQuery allocation; use PathUnescape for safe % decoding
+		s := rawQueryGet(u.RawQuery, "dns")
 		if s == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			return
@@ -224,6 +224,25 @@ func (h *Handler) ServeHTTP(w ResponseWriter, req Request) {
 	respHdr.Set("Cache-Control", "max-age="+strconv.Itoa(int(dnsutils.GetMinimalTTL(r))))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(resBytes)
+}
+
+func rawQueryGet(rawQuery, key string) string {
+	for rawQuery != "" {
+		var part string
+		part, rawQuery, _ = strings.Cut(rawQuery, "&")
+		if part == "" {
+			continue
+		}
+		k, v, _ := strings.Cut(part, "=")
+		if k == key {
+			decoded, err := url.PathUnescape(v)
+			if err != nil {
+				return v
+			}
+			return decoded
+		}
+	}
+	return ""
 }
 
 func getRemoteAddr(req Request, customHeader string) (netip.Addr, error) {
