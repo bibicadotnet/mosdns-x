@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 
@@ -39,16 +38,19 @@ func (m *Mosdns) startServers(cfg *ServerConfig) error {
 		queryTimeout = time.Duration(cfg.Timeout) * time.Second
 	}
 
+	// Link blocking options from ServerConfig to EntryHandlerOpts
 	dnsHandler, err := D.NewEntryHandler(D.EntryHandlerOpts{
 		Logger:             m.logger,
 		Entry:              entry,
 		QueryTimeout:       queryTimeout,
 		RecursionAvailable: true,
-		BlockAAAA:          cfg.BlockAAAA,
-		BlockPTR:           cfg.BlockPTR,
-		BlockHTTPS:         cfg.BlockHTTPS,
-		BlockNoDot:         cfg.BlockNoDot,
-		StripEDNS0:         cfg.StripEDNS0,
+
+		// New early blocking options mapped from config
+		BlockAAAA:  cfg.BlockAAAA,
+		BlockPTR:   cfg.BlockPTR,
+		BlockHTTPS: cfg.BlockHTTPS,
+		BlockNoDot: cfg.BlockNoDot,
+		StripEDNS0: cfg.StripEDNS0,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to init entry handler, %w", err)
@@ -98,6 +100,7 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 	}
 	s := server.NewServer(opts)
 
+	// helper func for proxy protocol listener
 	requirePP := func(_ net.Addr) (proxyproto.Policy, error) {
 		return proxyproto.REQUIRE, nil
 	}
@@ -109,79 +112,40 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 	var run func() error
 	switch cfg.Protocol {
 	case "", "udp", "quic", "doq", "h3", "doh3":
-		if cfg.Protocol == "" || cfg.Protocol == "udp" {
-			if cfg.UnixDomainSocket {
-				// Unix domain socket: single connection
-				if !abstract {
-					os.Remove(cfg.Addr)
+		var conn net.PacketConn
+		var err error
+		if cfg.UnixDomainSocket {
+			if !abstract {
+				os.Remove(cfg.Addr)
+			}
+			conn, err = config.ListenPacket(ctx, "unixgram", cfg.Addr)
+			if !abstract {
+				if err := os.Chmod(cfg.Addr, 0777); err != nil {
+					m.logger.Warn("failed to chmod unix socket", zap.String("addr", cfg.Addr), zap.Error(err))
 				}
-				conn, err := config.ListenPacket(ctx, "unixgram", cfg.Addr)
-				if err != nil {
-					return err
-				}
-				if !abstract {
-					if err := os.Chmod(cfg.Addr, 0777); err != nil {
-						m.logger.Warn("failed to chmod unix socket", zap.String("addr", cfg.Addr), zap.Error(err))
-					}
-				}
-				run = func() error { return s.ServeUDP(conn) }
-			} else {
-				// Network UDP: multiple sockets with SO_REUSEPORT
-				numSockets := runtime.NumCPU()
-				for i := 0; i < numSockets; i++ {
-					udpConn, err := config.ListenPacket(ctx, "udp", cfg.Addr)
-					if err != nil {
-						return fmt.Errorf("failed to create UDP socket %d: %w", i, err)
-					}
-					conn := udpConn
-
-					m.sc.Attach(func(done func(), closeSignal <-chan struct{}) {
-						defer done()
-						defer conn.Close()
-
-						if err := s.ServeUDP(conn); err != nil {
-							m.sc.SendCloseSignal(fmt.Errorf("udp server exited: %w", err))
-						}
-					})
-				}
-				return nil
 			}
 		} else {
-			// QUIC/H3 protocols
-			var conn net.PacketConn
-			var err error
-			if cfg.UnixDomainSocket {
-				if !abstract {
-					os.Remove(cfg.Addr)
-				}
-				conn, err = config.ListenPacket(ctx, "unixgram", cfg.Addr)
-				if !abstract {
-					if err := os.Chmod(cfg.Addr, 0777); err != nil {
-						m.logger.Warn("failed to chmod unix socket", zap.String("addr", cfg.Addr), zap.Error(err))
-					}
-				}
-			} else {
-				conn, err = config.ListenPacket(ctx, "udp", cfg.Addr)
-			}
+			conn, err = config.ListenPacket(ctx, "udp", cfg.Addr)
+		}
+		if err != nil {
+			return err
+		}
+		switch cfg.Protocol {
+		case "", "udp":
+			run = func() error { return s.ServeUDP(conn) }
+		case "quic", "doq":
+			l, err := s.CreateQUICListner(conn, []string{"doq"}, cfg.AllowedSNI)
 			if err != nil {
 				return err
 			}
-			switch cfg.Protocol {
-			case "quic", "doq":
-				l, err := s.CreateQUICListner(conn, []string{"doq"}, cfg.AllowedSNI)
-				if err != nil {
-					return err
-				}
-				run = func() error { return s.ServeQUIC(l) }
-			case "h3", "doh3":
-				l, err := s.CreateQUICListner(conn, []string{"h3"}, cfg.AllowedSNI)
-				if err != nil {
-					return err
-				}
-				run = func() error { return s.ServeH3(l) }
+			run = func() error { return s.ServeQUIC(l) }
+		case "h3", "doh3":
+			l, err := s.CreateQUICListner(conn, []string{"h3"}, cfg.AllowedSNI)
+			if err != nil {
+				return err
 			}
+			run = func() error { return s.ServeH3(l) }
 		}
-
 	case "tcp", "http", "tls", "dot", "https", "doh":
 		var l net.Listener
 		var err error
