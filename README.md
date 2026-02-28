@@ -52,7 +52,6 @@ For features, configuration guides, and tutorials, visit the [Wiki](https://gith
 * **Compression and packet optimization**:
   * Support certificate compression using Brotli if the client supports it.
   * Compress DNS packets before sending them to the client.
-  * For DoH and DoT, packet sizes are typically under 1252 bytes (below the MTU limit), so most only require a single packet, theoretically increasing speed (DoH3 and DoQ do not utilize this due to `quic-go` dependencies).
 
 ### Cache
 
