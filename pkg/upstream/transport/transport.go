@@ -504,11 +504,20 @@ func (dc *dnsConn) readLoop() {
 		dc.updateReadTime()
 
 		resChan := dc.getQueueC(r.Id)
+		
+		sent := false
 		if resChan != nil {
 			select {
-			case resChan <- r: // resChan has buffer
+			case resChan <- r:
+				sent = true
 			default:
+				// Buffer full, unable to send
 			}
+		}
+
+		// Fix: If not sent (resChan == nil or default case), release back to pool
+		if !sent {
+			pool.ReleaseMsg(r)
 		}
 	}
 }
