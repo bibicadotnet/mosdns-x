@@ -43,7 +43,7 @@ type fastForward struct {
 
 type Args struct {
 	Upstream []*UpstreamConfig `yaml:"upstream"`
-	CA        []string          `yaml:"ca"`
+	CA       []string          `yaml:"ca"`
 }
 
 type UpstreamConfig struct {
@@ -69,7 +69,8 @@ func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
 }
 
 func newFastForward(bp *coremain.BP, args *Args) (*fastForward, error) {
-	if len(args.Upstream) == 0 {
+	n := len(args.Upstream)
+	if n == 0 {
 		return nil, errors.New("no upstream is configured")
 	}
 
@@ -77,6 +78,9 @@ func newFastForward(bp *coremain.BP, args *Args) (*fastForward, error) {
 		BP:   bp,
 		args: args,
 	}
+
+	f.upstreamWrappers = make([]bundled_upstream.Upstream, 0, n)
+	f.upstreamsCloser = make([]io.Closer, 0, n)
 
 	var rootCAs *x509.CertPool
 	if len(args.CA) != 0 {
@@ -92,11 +96,9 @@ func newFastForward(bp *coremain.BP, args *Args) (*fastForward, error) {
 			return nil, errors.New("missing server addr")
 		}
 
-		// Handle Experimental UDPME
 		if strings.HasPrefix(c.Addr, "udpme://") {
 			u := newUDPME(c.Addr[8:])
 			f.upstreamWrappers = append(f.upstreamWrappers, u)
-			// UDPME doesn't need closer as it creates connection per request
 			continue
 		}
 
@@ -120,7 +122,7 @@ func newFastForward(bp *coremain.BP, args *Args) (*fastForward, error) {
 
 		u, err := upstream.NewUpstream(c.Addr, opt)
 		if err != nil {
-			return nil, fmt.Errorf("failed to init upstream: %w", err)
+			return nil, fmt.Errorf("failed to init upstream %s: %w", c.Addr, err)
 		}
 
 		w := &upstreamWrapper{
@@ -171,7 +173,7 @@ func (f *fastForward) exec(ctx context.Context, qCtx *query_context.Context) (er
 
 func (f *fastForward) Shutdown() error {
 	for _, u := range f.upstreamsCloser {
-		_ = u.Close() // Silently close during shutdown
+		_ = u.Close()
 	}
 	return nil
 }
