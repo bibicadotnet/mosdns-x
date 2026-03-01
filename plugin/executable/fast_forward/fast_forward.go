@@ -141,7 +141,6 @@ type upstreamWrapper struct {
 }
 
 func (u *upstreamWrapper) Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
-	q.Compress = true
 	return u.u.ExchangeContext(ctx, q)
 }
 
