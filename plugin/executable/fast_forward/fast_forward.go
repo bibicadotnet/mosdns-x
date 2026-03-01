@@ -43,7 +43,7 @@ type fastForward struct {
 
 type Args struct {
 	Upstream []*UpstreamConfig `yaml:"upstream"`
-	CA       []string          `yaml:"ca"`
+	CA        []string          `yaml:"ca"`
 }
 
 type UpstreamConfig struct {
@@ -162,8 +162,21 @@ func (f *fastForward) Exec(ctx context.Context, qCtx *query_context.Context, nex
 	return executable_seq.ExecChainNode(ctx, qCtx, next)
 }
 
-func (f *fastForward) exec(ctx context.Context, qCtx *query_context.Context) (err error) {
-	r, err := bundled_upstream.ExchangeParallel(ctx, qCtx, f.upstreamWrappers, f.L())
+func (f *fastForward) exec(ctx context.Context, qCtx *query_context.Context) error {
+	upstreams := f.upstreamWrappers
+	
+	// Hot Path: Direct call for single upstream to avoid concurrency overhead
+	if len(upstreams) == 1 {
+		r, err := upstreams[0].Exchange(ctx, qCtx.Q())
+		if err != nil {
+			return err
+		}
+		qCtx.SetResponse(r)
+		return nil
+	}
+
+	// Normal Path: Racing logic for multiple upstreams
+	r, err := bundled_upstream.ExchangeParallel(ctx, qCtx, upstreams, f.L())
 	if err != nil {
 		return err
 	}
