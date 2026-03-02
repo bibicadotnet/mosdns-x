@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package fastforward
 
 import (
@@ -30,23 +11,24 @@ import (
 )
 
 type udpmeUpstream struct {
-	addr    string
-	trusted bool
+	addr string
 }
 
-func newUDPME(addr string, trusted bool) *udpmeUpstream {
+func newUDPME(addr string) *udpmeUpstream {
 	if _, _, err := net.SplitHostPort(addr); err != nil {
 		addr = net.JoinHostPort(addr, "53")
 	}
-	return &udpmeUpstream{addr: addr, trusted: trusted}
+	return &udpmeUpstream{addr: addr}
 }
 
 func (u *udpmeUpstream) Address() string {
 	return u.addr
 }
 
+// Trusted now always returns true to satisfy the interface.
+// The core racing logic in bundled_upstream no longer uses this value.
 func (u *udpmeUpstream) Trusted() bool {
-	return u.trusted
+	return true
 }
 
 func (u *udpmeUpstream) Exchange(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
@@ -88,6 +70,8 @@ func (u *udpmeUpstream) exchangeOPTM(m *dns.Msg, ddl time.Time) (*dns.Msg, error
 		if err != nil {
 			return nil, err
 		}
+		// UDPME logic: Only accept responses that contain EDNS0.
+		// This is a mitigation against simple UDP spoofing.
 		if r.IsEdns0() == nil {
 			continue
 		}

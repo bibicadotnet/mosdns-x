@@ -1,53 +1,58 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package pool
 
 import (
 	"bytes"
-	"fmt"
 	"sync"
 )
 
+// BytesBufPool is a pool for bytes.Buffer to reduce GC pressure.
 type BytesBufPool struct {
-	p sync.Pool
+	p       sync.Pool
+	maxSize int
 }
 
+// NewBytesBufPool creates a new BytesBufPool.
+// It uses a maxCap limit to prevent memory bloating from unusually large buffers.
 func NewBytesBufPool(initSize int) *BytesBufPool {
 	if initSize < 0 {
-		panic(fmt.Sprintf("utils.NewBytesBufPool: negative init size %d", initSize))
+		initSize = 0
 	}
 
+	// Buffers larger than 64KB will not be returned to the pool to prevent memory bloat.
+	const maxKeepSize = 64 * 1024
+
 	return &BytesBufPool{
-		p: sync.Pool{New: func() interface{} {
-			b := new(bytes.Buffer)
-			b.Grow(initSize)
-			return b
-		}},
+		maxSize: maxKeepSize,
+		p: sync.Pool{
+			New: func() interface{} {
+				b := new(bytes.Buffer)
+				if initSize > 0 {
+					b.Grow(initSize)
+				}
+				return b
+			},
+		},
 	}
 }
 
+// Get returns a *bytes.Buffer from the pool.
 func (p *BytesBufPool) Get() *bytes.Buffer {
 	return p.p.Get().(*bytes.Buffer)
 }
 
+// Release resets and returns the buffer to the pool.
+// It discards buffers that have grown beyond maxSize to keep memory footprint low.
 func (p *BytesBufPool) Release(b *bytes.Buffer) {
-	b.Reset()
+	if b == nil {
+		return
+	}
+
+	// If the buffer grew too large (e.g., handling massive domain lists),
+	// discard it so the GC can reclaim the memory.
+	if b.Cap() > p.maxSize {
+		return
+	}
+
+	b.Reset() // Resets length to 0 while keeping capacity.
 	p.p.Put(b)
 }

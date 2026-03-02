@@ -1,29 +1,9 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package dns_handler
 
 import (
 	"context"
 	"errors"
-	"fmt"
-	"testing"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -40,32 +20,22 @@ const (
 
 var nopLogger = zap.NewNop()
 
-// Handler handles dns query.
 type Handler interface {
-	// ServeDNS handles incoming request req and returns a response.
-	// Implements must not keep and use req after the ServeDNS returned.
-	// ServeDNS should handle dns errors by itself and return a proper error responses
-	// for clients.
-	// ServeDNS should always return a responses.
-	// If ServeDNS returns an error, caller considers that the error is associated
-	// with the downstream connection and will close the downstream connection
-	// immediately.
-	// All input parameters won't be nil.
 	ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error)
 }
 
 type EntryHandlerOpts struct {
-	// Logger is used for logging. Default is a noop logger.
-	Logger *zap.Logger
-
-	Entry executable_seq.Executable
-
-	// QueryTimeout limits the timeout value of each query.
-	// Default is defaultQueryTimeout.
-	QueryTimeout time.Duration
-
-	// RecursionAvailable sets the dns.Msg.RecursionAvailable flag globally.
+	Logger             *zap.Logger
+	Entry              executable_seq.Executable
+	QueryTimeout       time.Duration
 	RecursionAvailable bool
+
+	// New optional features for early blocking
+	BlockAAAA   bool
+	BlockPTR    bool
+	BlockHTTPS  bool
+	BlockNoDot  bool
+	StripEDNS0  bool
 }
 
 func (opts *EntryHandlerOpts) Init() error {
@@ -83,94 +53,174 @@ type EntryHandler struct {
 	opts EntryHandlerOpts
 }
 
-func NewEntryHandler(opts EntryHandlerOpts) (*EntryHandler, error) {
+func NewEntryHandler(opts EntryHandlerOpts) (Handler, error) {
 	if err := opts.Init(); err != nil {
 		return nil, err
 	}
 	return &EntryHandler{opts: opts}, nil
 }
 
-// ServeDNS implements Handler.
-// If entry returns an error, a SERVFAIL response will be returned.
-// If entry returns without a response, a REFUSED response will be returned.
 func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error) {
-	// apply timeout to ctx
+	// 1. Context & Deadline Setup
+	qCtx := ctx
+	cancel := func() {}
+
 	ddl := time.Now().Add(h.opts.QueryTimeout)
-	ctxDdl, ok := ctx.Deadline()
-	if !(ok && ctxDdl.Before(ddl)) {
-		newCtx, cancel := context.WithDeadline(ctx, ddl)
-		defer cancel()
-		ctx = newCtx
+	if d, ok := ctx.Deadline(); !ok || d.After(ddl) {
+		qCtx, cancel = context.WithDeadline(ctx, ddl)
 	}
-	// return FORMERR response
-	if len(req.Question) == 0 {
-		h.opts.Logger.Warn("zero question")
-		return h.responseFormErr(req), nil
+	defer cancel()
+
+	// 2. Optimized Structural & Protocol Validation
+	if len(req.Question) != 1 {
+		h.opts.Logger.Debug("refused: invalid question count", zap.Uint16("id", req.Id))
+		return h.responseRefused(req), nil
 	}
-	for _, question := range req.Question {
-		_, ok := dns.IsDomainName(question.Name)
-		if !ok {
-			h.opts.Logger.Warn(fmt.Sprintf("invalid question name: %s", question.Name))
-			return h.responseFormErr(req), nil
+
+	if req.Opcode != dns.OpcodeQuery {
+		h.opts.Logger.Debug("refused: unusual opcode", zap.Uint16("id", req.Id))
+		return h.responseRefused(req), nil
+	}
+
+	// 3. RFC 8482 & Early Noise Filtering
+	q := req.Question[0]
+
+	// Block ANY Queries Early (RFC 8482)
+	if q.Qtype == dns.TypeANY {
+		h.opts.Logger.Debug("blocked: ANY query (RFC 8482)", zap.Uint16("id", req.Id))
+		r := new(dns.Msg)
+		r.SetReply(req)
+		r.Answer = []dns.RR{&dns.HINFO{
+			Hdr: dns.RR_Header{
+				Name:   q.Name,
+				Rrtype: dns.TypeHINFO,
+				Class:  dns.ClassINET,
+				Ttl:    8482,
+			},
+			Cpu: "ANY obsoleted",
+			Os:  "See RFC 8482",
+		}}
+		if h.opts.RecursionAvailable {
+			r.RecursionAvailable = true
+		}
+		return r, nil
+	}
+
+	// Early Noise Filtering based on options
+	if (h.opts.BlockAAAA && q.Qtype == dns.TypeAAAA) ||
+		(h.opts.BlockPTR && q.Qtype == dns.TypePTR) ||
+		(h.opts.BlockHTTPS && q.Qtype == dns.TypeHTTPS) {
+		r := new(dns.Msg)
+		r.SetRcode(req, dns.RcodeSuccess)
+		if h.opts.RecursionAvailable {
+			r.RecursionAvailable = true
+		}
+		return r, nil
+	}
+
+	// 4. Domain Validation & Lowercase Check (Single Pass)
+	name := q.Name
+	hasDot := false
+	hasUpper := false
+
+	// Skip the last root dot to check for valid TLD structure
+	for i := 0; i < len(name)-1; i++ {
+		c := name[i]
+		if c == '.' {
+			hasDot = true
+		} else if c >= 'A' && c <= 'Z' {
+			hasUpper = true
 		}
 	}
-	// cache original id
-	id := req.Id
 
-	// exec entry
-	qCtx := query_context.NewContext(req, meta)
-	err := h.opts.Entry.Exec(ctx, qCtx, nil)
-	respMsg := qCtx.R()
+	// Optional check for missing dot separator (e.g., "localhost.")
+	if h.opts.BlockNoDot && !hasDot {
+		return h.responseNXDomain(req), nil
+	}
+
+	// Only perform allocation if uppercase characters were detected
+	if hasUpper {
+		req.Question[0].Name = strings.ToLower(name)
+	}
+
+	// 5. Final Hygiene Checks
+	if q.Qclass != dns.ClassINET {
+		h.opts.Logger.Debug("refused: unsupported qclass", zap.Uint16("id", req.Id))
+		return h.responseRefused(req), nil
+	}
+
+	if req.Response || req.Authoritative || req.Truncated ||
+		req.RecursionAvailable || req.Zero || len(req.Answer) != 0 || len(req.Ns) != 0 {
+		h.opts.Logger.Debug("refused: malformed header flags or sections", zap.Uint16("id", req.Id))
+		return h.responseRefused(req), nil
+	}
+
+	// 6. Strip EDNS0 before context creation
+	if h.opts.StripEDNS0 {
+		req.Extra = nil
+	}
+
+	// 7. Execution Flow
+	origID := req.Id
+	queryCtx := query_context.NewContext(req, meta)
+
+	execStart := time.Now()
+	err := h.opts.Entry.Exec(qCtx, queryCtx, nil)
+	execDuration := time.Since(execStart)
+	respMsg := queryCtx.R()
+
+	// 8. Logging
+	if execDuration > 500*time.Millisecond {
+		h.opts.Logger.Warn("slow query execution", queryCtx.InfoField(), zap.Duration("duration", execDuration))
+	}
 	if err != nil {
-		h.opts.Logger.Warn("entry returned an err", qCtx.InfoField(), zap.Error(err))
-	} else {
-		h.opts.Logger.Debug("entry returned", qCtx.InfoField())
-	}
-	if err == nil && respMsg == nil {
-		h.opts.Logger.Error("entry returned an nil response", qCtx.InfoField())
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			h.opts.Logger.Debug("query interrupted", queryCtx.InfoField(), zap.Error(err))
+		} else {
+			h.opts.Logger.Warn("entry returned an err", queryCtx.InfoField(), zap.Error(err))
+		}
 	}
 
-	if respMsg == nil || err != nil {
+	// 9. Response Finalization
+	if respMsg == nil {
+		if err == nil {
+			h.opts.Logger.Error("entry returned with nil response", queryCtx.InfoField())
+		}
+
 		respMsg = new(dns.Msg)
 		respMsg.SetReply(req)
-		respMsg.Rcode = dns.RcodeServerFailure
+
+		if err != nil {
+			respMsg.Rcode = dns.RcodeServerFailure
+		} else {
+			respMsg.Rcode = dns.RcodeRefused
+		}
 	}
 
 	if h.opts.RecursionAvailable {
 		respMsg.RecursionAvailable = true
 	}
-	respMsg.Id = id
+	respMsg.Id = origID
+
 	return respMsg, nil
 }
 
-func (h *EntryHandler) responseFormErr(req *dns.Msg) *dns.Msg {
+func (h *EntryHandler) responseRefused(req *dns.Msg) *dns.Msg {
 	res := new(dns.Msg)
 	res.SetReply(req)
-	res.Rcode = dns.RcodeFormatError
+	res.Rcode = dns.RcodeRefused
 	if h.opts.RecursionAvailable {
 		res.RecursionAvailable = true
 	}
 	return res
 }
 
-type DummyServerHandler struct {
-	T       *testing.T
-	WantMsg *dns.Msg
-	WantErr error
-}
-
-func (d *DummyServerHandler) ServeDNS(_ context.Context, req *dns.Msg, meta *query_context.RequestMeta) (*dns.Msg, error) {
-	if d.WantErr != nil {
-		return nil, d.WantErr
+func (h *EntryHandler) responseNXDomain(req *dns.Msg) *dns.Msg {
+	res := new(dns.Msg)
+	res.SetReply(req)
+	res.Rcode = dns.RcodeNameError
+	if h.opts.RecursionAvailable {
+		res.RecursionAvailable = true
 	}
-
-	var resp *dns.Msg
-	if d.WantMsg != nil {
-		resp = d.WantMsg.Copy()
-		resp.Id = req.Id
-	} else {
-		resp = new(dns.Msg)
-		resp.SetReply(req)
-	}
-	return resp, nil
+	return res
 }

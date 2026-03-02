@@ -1,0 +1,445 @@
+# =============================================================================
+# Mosdns-x PR (Privacy & Resilience) Configuration for dns.bibica.net
+# Architecture: Clean DNS, ECS CDN, Domain Routing with Memory Cache
+# =============================================================================
+
+# ============================================================================
+# LOGGING & DIAGNOSTICS
+# ============================================================================
+
+#log:
+#  level: error	# Options: debug, info, error, warn
+#  file: "log/mosdns.log"
+
+# ============================================================================
+# DATA PROVIDERS - External domain lists and rules
+# ============================================================================
+data_providers:
+
+  - tag: domain_list_private_tlds
+    file: "rules/private_tlds.txt"
+    auto_reload: true
+
+  # Domain routing lists
+  - tag: cdn_domains
+    file: "rules/cdn_domains.txt"
+    auto_reload: true
+
+  - tag: google_domains
+    file: "rules/google_upstream.txt"
+    auto_reload: true
+
+  - tag: mullvad_domains
+    file: "rules/mullvad_upstream.txt"
+    auto_reload: true
+
+  # CDN IP ranges
+  - tag: cloudfront_ips
+    file: "rules/cloudfront_ips.txt"
+    auto_reload: true
+
+  - tag: fastly_ips
+    file: "rules/fastly_ips.txt"
+    auto_reload: true
+
+  - tag: bunnycdn_ips
+    file: "rules/bunnycdn_ips.txt"
+    auto_reload: true
+
+  - tag: gcore_ips
+    file: "rules/gcore_ips.txt"
+    auto_reload: true
+
+  # Content filtering
+  - tag: allowlist_domains
+    file: "rules/allowlists.txt"
+    auto_reload: true
+
+  - tag: blocklist_domains
+    file: "rules/blocklists.txt"
+    auto_reload: true
+
+  # DNS rewrite rules
+  - tag: redirect_rules
+    file: "rules/redirect_rules.txt"
+    auto_reload: true
+
+# ============================================================================
+# PLUGINS
+# ============================================================================
+plugins:
+  # ==========================================================================
+  # QUERY MATCHERS - Identify query types and sources
+  # ==========================================================================
+
+  # Client source matcher
+  - tag: query_matcher_localhost
+    type: query_matcher
+    args:
+      client_ip:
+        - "127.0.0.0/8"
+
+  # Private TLD matcher (RFC 6761)
+  - tag: match_domain_private_tld
+    type: query_matcher
+    args:
+      domain:
+        - "provider:domain_list_private_tlds"
+
+  # Domain routing matchers
+  - tag: match_cdn_domain
+    type: query_matcher
+    args:
+      domain:
+        - "provider:cdn_domains"
+
+  - tag: match_google_domain
+    type: query_matcher
+    args:
+      domain:
+        - "provider:google_domains"
+
+  - tag: match_mullvad_domain
+    type: query_matcher
+    args:
+      domain:
+        - "provider:mullvad_domains"
+
+  # Content filtering matchers
+  - tag: match_allowlisted
+    type: query_matcher
+    args:
+      domain:
+        - "provider:allowlist_domains"
+
+  - tag: match_blocklisted
+    type: query_matcher
+    args:
+      domain:
+        - "provider:blocklist_domains"
+
+  # ==========================================================================
+  # RESPONSE MATCHERS - Analyze DNS responses
+  # ==========================================================================
+  
+  - tag: response_has_cdn_cname
+    type: response_matcher
+    args:
+      cname:
+        - "provider:cdn_domains"
+
+  - tag: response_has_cloudfront_ip
+    type: response_matcher
+    args:
+      ip:
+        - "provider:cloudfront_ips"
+
+  - tag: response_has_fastly_ip
+    type: response_matcher
+    args:
+      ip:
+        - "provider:fastly_ips"
+
+  - tag: response_has_bunnycdn_ip
+    type: response_matcher
+    args:
+      ip:
+        - "provider:bunnycdn_ips"
+
+  - tag: response_has_gcore_ip
+    type: response_matcher
+    args:
+      ip:
+        - "provider:gcore_ips"
+
+  # ==========================================================================
+  # RESPONSE MODIFIERS
+  # ==========================================================================
+
+  - tag: ttl_short
+    type: ttl
+    args:
+      minimal_ttl: 60
+
+  # Ad-blocking blackhole (NULL IP response)
+  - tag: black_hole
+    type: blackhole
+    args:
+      rcode: 0
+      ipv4: ["0.0.0.0"]
+
+  # ==========================================================================
+  # ECS & DNS PROCESSING
+  # ==========================================================================
+  
+  - tag: ecs_handler
+    type: ecs
+    args:
+      auto: true
+      force_overwrite: true
+
+  - tag: dns_redirect
+    type: redirect
+    args:
+      rule:
+        - "provider:redirect_rules"
+
+  # ==========================================================================
+  # DYNAMIC COLLECTOR - Self-learning CDN domains
+  # ==========================================================================
+
+  - tag: cdn_list_exporter
+    type: dynamic_domain_collector
+    args:
+      file: "rules/cdn_domains.txt"
+
+  # ==========================================================================
+  # MEMORY CACHE - Per-upstream caching strategy
+  # ==========================================================================
+  
+  # Google cache (with ECS support)
+  - tag: google_cache
+    type: cache
+    args:
+      size: 424550 # google_cache
+      lazy_cache_ttl: 259200
+      lazy_cache_reply_ttl: 5
+      cleaner_interval: 60
+      
+  # CDN direct cache (with ECS support)
+  - tag: cdn_direct_cache
+    type: cache
+    args:
+      size: 283034 # cdn_direct_cache
+      lazy_cache_ttl: 259200
+      lazy_cache_reply_ttl: 5
+      cleaner_interval: 62
+      
+  # CDN CNAME cache (with ECS support)
+  - tag: cdn_cname_cache
+    type: cache
+    args:
+      size: 283034 # cdn_cname_cache
+      lazy_cache_ttl: 259200
+      lazy_cache_reply_ttl: 5
+      cleaner_interval: 64
+      
+  # Mullvad cache (no ECS)
+  - tag: mullvad_cache
+    type: cache
+    args:
+      size: 1024 # mullvad_cache
+      lazy_cache_ttl: 259200
+      lazy_cache_reply_ttl: 5
+      cleaner_interval: 66
+      
+  # Cloudflare cache (no ECS)
+  - tag: cloudflare_cache
+    type: cache
+    args:
+      size: 849101 # cloudflare_cache
+      lazy_cache_ttl: 259200
+      lazy_cache_reply_ttl: 5
+      cleaner_interval: 68
+
+  # ==========================================================================
+  # UPSTREAM RESOLVERS
+  # ==========================================================================
+  
+  - tag: upstream_google
+    type: fast_forward
+    args:
+      upstream:
+        - addr: "tls://8.8.8.8"
+          dial_addr: "8.8.8.8"
+        - addr: "https://8.8.4.4/dns-query"
+          dial_addr: "8.8.4.4"
+
+  - tag: upstream_cloudflare
+    type: fast_forward
+    args:
+      upstream:
+        - addr: "tls://1.1.1.1"
+          dial_addr: "1.1.1.1"
+        - addr: "https://1.0.0.1/dns-query"
+          dial_addr: "1.0.0.1"
+
+  - tag: upstream_cloudflare_gateway
+    type: fast_forward
+    args:
+      upstream:
+        - addr: "tls://bu0eg1tdzu.cloudflare-gateway.com"
+          dial_addr: "162.159.36.5"
+        - addr: "https://rhpcv957tj.cloudflare-gateway.com/dns-query"
+          dial_addr: "162.159.36.20"
+
+  - tag: upstream_mullvad
+    type: fast_forward
+    args:
+      upstream:
+        - addr: "tls://dns.mullvad.net"
+          dial_addr: "194.242.2.2"
+        - addr: "https://dns.mullvad.net/dns-query"
+          dial_addr: "194.242.2.2"
+
+# ==========================================================================
+# MAIN SEQUENCE - DNS Query Processing Pipeline
+# ==========================================================================
+  
+  - tag: main
+    type: sequence
+    args:
+      exec:
+
+        # Note: Pre-processing (Strip EDNS0, Block ANY/AAAA/PTR/HTTPS, 
+        # Domain validation, and Lowercase conversion) are now handled 
+        # NATIVELY at the server level for maximum performance
+        
+        # ====================================================================
+        # PHASE 1: Policy Enforcement
+        # ====================================================================
+
+        # Block Private TLDs (.local, .lan, etc.)
+        - if: match_domain_private_tld
+          exec:
+            - _new_nxdomain_response
+            - _return
+
+        # Block ads/trackers (unless allowlisted)
+        - if: "!match_allowlisted"
+          exec:
+            - if: match_blocklisted
+              exec:
+                - black_hole    # return NULL IP 0.0.0.0
+                - _return
+
+        # ====================================================================
+        # PHASE 2: Local Processing
+        # ====================================================================
+
+        # Apply DNS rewrites (local overrides)
+        - dns_redirect
+
+        # ====================================================================
+        # PHASE 3: Query Logging & Routing
+        # ====================================================================
+        
+    #    - _query_summary
+
+        # Route: Google domains → Google DNS (with conditional ECS)
+        - if: match_google_domain
+          exec:
+            # Add ECS if not from localhost
+            - if: "!query_matcher_localhost"
+              exec:
+                - ecs_handler
+            - google_cache
+            - upstream_google
+            - _limit_2_ips
+            - ttl_short
+            - _no_cname
+            - _return
+
+        # Route: CDN domains → Cloudflare Gateway (with ECS)
+        - if: match_cdn_domain
+          exec:
+            - ecs_handler
+            - cdn_direct_cache
+            - upstream_cloudflare_gateway
+            - _limit_2_ips
+            - ttl_short
+            - _no_cname
+            - _return
+
+        # Route: Mullvad domains → Mullvad DNS
+        - if: match_mullvad_domain
+          exec:
+            - mullvad_cache
+            - upstream_mullvad
+            - _limit_2_ips
+            - ttl_short
+            - _no_cname
+            - _return
+
+        # Route: Everything else → Cloudflare DNS (default)
+        - cloudflare_cache
+        - upstream_cloudflare
+
+        # ====================================================================
+        # PHASE 4: CDN Detection & Re-resolution
+        # ====================================================================
+
+        # Re-resolve if response has CDN CNAME OR any CDN IP (CloudFront/Fastly/BunnyCDN/Gcore)
+        - if: "response_has_cdn_cname || response_has_cloudfront_ip || response_has_fastly_ip || response_has_bunnycdn_ip || response_has_gcore_ip"
+          exec:
+            - ecs_handler
+            - cdn_cname_cache
+            - upstream_cloudflare_gateway
+            - cdn_list_exporter
+            - _limit_2_ips
+            - ttl_short
+            - _no_cname
+            - _return
+
+        # Final adjustments for "Everything else" (non-CDN responses from Cloudflare)
+        - _limit_2_ips
+        - ttl_short
+        - _no_cname
+
+# ============================================================================
+# SERVERS - Protocol Listeners
+# ============================================================================
+servers:
+  - exec: main
+    # Early blocking options
+    block_aaaa: false      # Block IPv6 AAAA (28) queries
+    block_ptr: true        # Block Reverse DNS PTR (12) queries
+    block_https: true      # Block HTTPS (65) type queries
+    block_no_dot: true     # Block domains without a dot
+    strip_edns0: true      # Strip EDNS0 before processing
+
+    listeners:
+      # DNS-over-UDP
+      - protocol: udp
+        addr: "0.0.0.0:53"
+
+      # DNS-over-TCP
+      - protocol: tcp
+        addr: "0.0.0.0:53"
+
+      # DNS-over-HTTPS (DoH)
+      - protocol: https
+        addr: "0.0.0.0:443"
+        url_path: "/dns-query"
+        health_path: "/health"
+        redirect_url: "https://bibica.net/dns-mien-phi-tu-dns-bibica-net/"
+        cert: "/home/lego/certificates/dns.bibica.net.crt"
+        key: "/home/lego/certificates/dns.bibica.net.key"
+        allowed_sni: "dns.bibica.net"
+
+      # DNS-over-HTTP/3 (DoH3)
+      - protocol: h3
+        addr: "0.0.0.0:443"
+        url_path: "/dns-query"
+        health_path: "/health"
+        redirect_url: "https://bibica.net/dns-mien-phi-tu-dns-bibica-net/"
+        cert: "/home/lego/certificates/dns.bibica.net.crt"
+        key: "/home/lego/certificates/dns.bibica.net.key"
+        allowed_sni: "dns.bibica.net"
+
+      # DNS-over-TLS (DoT)
+      - protocol: tls
+        addr: "0.0.0.0:853"
+        cert: "/home/lego/certificates/dns.bibica.net.crt"
+        key: "/home/lego/certificates/dns.bibica.net.key"
+        allowed_sni: "dns.bibica.net"
+
+      # DNS-over-QUIC (DoQ)
+      - protocol: quic
+        addr: "0.0.0.0:853"
+        cert: "/home/lego/certificates/dns.bibica.net.crt"
+        key: "/home/lego/certificates/dns.bibica.net.key"
+        allowed_sni: "dns.bibica.net"
+
+#api:
+#    http: "0.0.0.0:9080"

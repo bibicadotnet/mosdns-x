@@ -46,11 +46,6 @@ func (s *Server) ServeUDP(c net.PacketConn) error {
 		return errMissingDNSHandler
 	}
 
-	if ok := s.trackCloser(c, true); !ok {
-		return ErrServerClosed
-	}
-	defer s.trackCloser(c, false)
-
 	listenerCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -73,21 +68,20 @@ func (s *Server) ServeUDP(c net.PacketConn) error {
 	for {
 		n, localAddr, ifIndex, remoteAddr, err := cmc.readFrom(rb)
 		if err != nil {
-			if s.Closed() {
-				return ErrServerClosed
-			}
 			return fmt.Errorf("unexpected read err: %w", err)
 		}
 		clientAddr := utils.GetAddrFromAddr(remoteAddr)
 
-		q := new(dns.Msg)
+		q := pool.GetMsg()
 		if err := q.Unpack(rb[:n]); err != nil {
+			pool.ReleaseMsg(q)
 			s.opts.Logger.Warn("invalid msg", zap.Error(err), zap.Binary("msg", rb[:n]), zap.Stringer("from", remoteAddr))
 			continue
 		}
 
 		// handle query
 		go func() {
+			defer pool.ReleaseMsg(q)
 			meta := C.NewRequestMeta(clientAddr)
 			meta.SetProtocol(C.ProtocolUDP)
 

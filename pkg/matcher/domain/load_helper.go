@@ -1,20 +1,7 @@
 /*
- * Copyright (C) 2020-2022, IrineSistiana
+ * Copyright (C) 2020-2026, IrineSistiana
  *
  * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 package domain
@@ -110,8 +97,6 @@ func (m *MatcherGroup[T]) AppendCloser(f func()) {
 }
 
 // BatchLoadProvider loads multiple data entries.
-// Caller must call MatcherGroup.Close to detach this matcher from data_provider.DataManager to
-// avoid leaking.
 func BatchLoadProvider[T any](
 	e []string,
 	staticMatcher WriteableMatcher[T],
@@ -148,8 +133,6 @@ func BatchLoadProvider[T any](
 }
 
 // BatchLoadDomainProvider loads multiple domain entries.
-// Caller must call MatcherGroup.Close to detach this matcher from data_provider.DataManager to
-// avoid leaking.
 func BatchLoadDomainProvider(
 	e []string,
 	dm *data_provider.DataManager,
@@ -184,7 +167,8 @@ func BatchLoadDomainProvider(
 				provider.DeleteListener(m)
 			})
 		} else {
-			err := Load[struct{}](staticMatcher, s, nil)
+			// Normalize static domain entries from config (YAML) to lowercase.
+			err := Load[struct{}](staticMatcher, strings.ToLower(s), nil)
 			if err != nil {
 				return nil, fmt.Errorf("failed to load data %s: %w", s, err)
 			}
@@ -228,7 +212,7 @@ func (d *DynamicMatcher[T]) Update(b []byte) error {
 	return nil
 }
 
-// LoadFromTextReader loads multiple lines from reader r. r
+// LoadFromTextReader loads multiple lines from reader r.
 func LoadFromTextReader[T any](m WriteableMatcher[T], r io.Reader, parseString ParseStringFunc[T]) error {
 	lineCounter := 0
 	scanner := bufio.NewScanner(r)
@@ -239,6 +223,15 @@ func LoadFromTextReader[T any](m WriteableMatcher[T], r io.Reader, parseString P
 		s = strings.TrimSpace(s)
 		if len(s) == 0 {
 			continue
+		}
+
+		// Normalize text file entries to lowercase.
+		// Excludes 'regex:' prefix if logic requires specific case for regex patterns.
+		prefix, val, found := strings.Cut(s, ":")
+		if found && prefix != "regex" {
+			s = prefix + ":" + strings.ToLower(val)
+		} else if !found {
+			s = strings.ToLower(s)
 		}
 
 		err := Load(m, s, parseString)
@@ -264,7 +257,6 @@ type V2filter struct {
 }
 
 // ParseV2Suffix parses s into V2filter.
-// The format of s is "tag[@attr@attr...],tag[@attr@attr...]..."
 func ParseV2Suffix(s string) []*V2filter {
 	vf := make([]*V2filter, 0)
 	for _, t := range strings.Split(s, ",") {
@@ -284,8 +276,6 @@ func ParseV2Suffix(s string) []*V2filter {
 }
 
 // NewV2rayDomainDat builds a V2rayDomainDat from given v and args.
-// The format of args is "tag1@attr1@attr2,tag2@attr1...".
-// Only domains that are matched by the args will be loaded to V2rayDomainDat.
 func NewV2rayDomainDat(v *v2data.GeoSiteList, filters ...*V2filter) (*MixMatcher[struct{}], error) {
 	dataTags := make(map[string][]*v2data.Domain)
 	for _, gs := range v.GetEntry() {
@@ -355,7 +345,13 @@ getDomainLoop:
 			return nil, fmt.Errorf("invalid MixMatcher, missing submatcher %s", subMatcherType)
 		}
 
-		if err := sm.Add(d.Value, struct{}{}); err != nil {
+		// Normalize v2ray domain values to lowercase, except for Regex types.
+		val := d.Value
+		if d.Type != v2data.Domain_Regex {
+			val = strings.ToLower(val)
+		}
+
+		if err := sm.Add(val, struct{}{}); err != nil {
 			return nil, fmt.Errorf("failed to load value %s, %w", d.Value, err)
 		}
 	}

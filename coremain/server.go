@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package coremain
 
 import (
@@ -37,7 +18,7 @@ import (
 	H "github.com/pmkol/mosdns-x/pkg/server/http_handler"
 )
 
-const defaultQueryTimeout = time.Second * 5
+const defaultQueryTimeout = time.Second * 10
 
 func (m *Mosdns) startServers(cfg *ServerConfig) error {
 	if len(cfg.Listeners) == 0 {
@@ -57,11 +38,19 @@ func (m *Mosdns) startServers(cfg *ServerConfig) error {
 		queryTimeout = time.Duration(cfg.Timeout) * time.Second
 	}
 
+	// Link blocking options from ServerConfig to EntryHandlerOpts
 	dnsHandler, err := D.NewEntryHandler(D.EntryHandlerOpts{
 		Logger:             m.logger,
 		Entry:              entry,
 		QueryTimeout:       queryTimeout,
 		RecursionAvailable: true,
+
+		// New early blocking options mapped from config
+		BlockAAAA:  cfg.BlockAAAA,
+		BlockPTR:   cfg.BlockPTR,
+		BlockHTTPS: cfg.BlockHTTPS,
+		BlockNoDot: cfg.BlockNoDot,
+		StripEDNS0: cfg.StripEDNS0,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to init entry handler, %w", err)
@@ -90,6 +79,8 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 	httpHandler, err := H.NewHandler(H.HandlerOpts{
 		DNSHandler:  dnsHandler,
 		Path:        cfg.URLPath,
+		HealthPath:  cfg.HealthPath,
+		RedirectURL: cfg.RedirectURL,
 		SrcIPHeader: cfg.GetUserIPFromHeader,
 		Logger:      m.logger,
 	})
@@ -129,7 +120,9 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 			}
 			conn, err = config.ListenPacket(ctx, "unixgram", cfg.Addr)
 			if !abstract {
-				os.Chmod(cfg.Addr, 0x777)
+				if err := os.Chmod(cfg.Addr, 0777); err != nil {
+					m.logger.Warn("failed to chmod unix socket", zap.String("addr", cfg.Addr), zap.Error(err))
+				}
 			}
 		} else {
 			conn, err = config.ListenPacket(ctx, "udp", cfg.Addr)
@@ -141,13 +134,13 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 		case "", "udp":
 			run = func() error { return s.ServeUDP(conn) }
 		case "quic", "doq":
-			l, err := s.CreateQUICListner(conn, []string{"doq"})
+			l, err := s.CreateQUICListner(conn, []string{"doq"}, cfg.AllowedSNI)
 			if err != nil {
 				return err
 			}
 			run = func() error { return s.ServeQUIC(l) }
 		case "h3", "doh3":
-			l, err := s.CreateQUICListner(conn, []string{"h3"})
+			l, err := s.CreateQUICListner(conn, []string{"h3"}, cfg.AllowedSNI)
 			if err != nil {
 				return err
 			}
@@ -162,7 +155,9 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 			}
 			l, err = config.Listen(ctx, "unix", cfg.Addr)
 			if !abstract {
-				os.Chmod(cfg.Addr, 0x777)
+				if err := os.Chmod(cfg.Addr, 0777); err != nil {
+					m.logger.Warn("failed to chmod unix socket", zap.String("addr", cfg.Addr), zap.Error(err))
+				}
 			}
 		} else {
 			l, err = config.Listen(ctx, "tcp", cfg.Addr)
@@ -177,7 +172,7 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 		case "tcp":
 			run = func() error { return s.ServeTCP(l) }
 		case "tls", "dot":
-			l, err = s.CreateETLSListner(l, []string{"dot"})
+			l, err = s.CreateETLSListner(l, []string{"dot"}, cfg.AllowedSNI)
 			if err != nil {
 				return err
 			}
@@ -185,7 +180,7 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 		case "http":
 			run = func() error { return s.ServeHTTP(l) }
 		case "https", "doh":
-			l, err = s.CreateETLSListner(l, []string{"h2"})
+			l, err = s.CreateETLSListner(l, []string{"h2"}, cfg.AllowedSNI)
 			if err != nil {
 				return err
 			}
@@ -193,6 +188,10 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 		}
 	default:
 		return fmt.Errorf("unknown protocol: [%s]", cfg.Protocol)
+	}
+
+	if run == nil {
+		return fmt.Errorf("failed to init runner for protocol %s", cfg.Protocol)
 	}
 
 	m.sc.Attach(func(done func(), closeSignal <-chan struct{}) {

@@ -117,10 +117,14 @@ func (u *Upstream) Close() error {
 	u.pendingMu.Unlock()
 
 	for _, it := range snapshot {
-		select {
-		case it.entry.ch <- nil:
-		default:
-		}
+		// Use goroutine to ensure nil is sent even if channel is temporarily full
+		go func(entry *pendingEntry) {
+			select {
+			case entry.ch <- nil:
+			case <-time.After(100 * time.Millisecond):
+				// Give up after 100ms to avoid goroutine leak
+			}
+		}(it.entry)
 	}
 	return nil
 }
@@ -245,10 +249,14 @@ func (u *Upstream) handleConnClosed(conn net.Conn, _ error) {
 	u.pendingMu.Unlock()
 
 	for _, it := range snapshot {
-		select {
-		case it.entry.ch <- nil:
-		default:
-		}
+		// Use goroutine to ensure nil is sent even if channel is temporarily full
+		go func(entry *pendingEntry) {
+			select {
+			case entry.ch <- nil:
+			case <-time.After(100 * time.Millisecond):
+				// Give up after 100ms to avoid goroutine leak
+			}
+		}(it.entry)
 	}
 
 	select {
@@ -369,8 +377,50 @@ func (u *Upstream) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, e
 		}
 		resp.Id = origID
 		return resp, nil
+	default:
+	}
+
+	select {
+	case resp := <-respCh:
+		if resp == nil {
+			return nil, errors.New("connection closed or read error")
+		}
+		if resp.Truncated {
+			if u.tcpTransport == nil {
+				return nil, errors.New("truncated response but tcpTransport is nil")
+			}
+			resp, err := u.tcpTransport.ExchangeContext(ctx, q)
+			if err != nil {
+				return nil, err
+			}
+			resp.Id = origID
+			return resp, nil
+		}
+		resp.Id = origID
+		return resp, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		// Double-check: response may have arrived during context cancellation
+		select {
+		case resp := <-respCh:
+			if resp == nil {
+				return nil, errors.New("connection closed or read error")
+			}
+			if resp.Truncated {
+				if u.tcpTransport == nil {
+					return nil, errors.New("truncated response but tcpTransport is nil")
+				}
+				resp, err := u.tcpTransport.ExchangeContext(ctx, q)
+				if err != nil {
+					return nil, err
+				}
+				resp.Id = origID
+				return resp, nil
+			}
+			resp.Id = origID
+			return resp, nil
+		default:
+			return nil, ctx.Err()
+		}
 	}
 }
 

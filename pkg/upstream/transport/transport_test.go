@@ -68,28 +68,28 @@ func TestTransport_Exchange(t *testing.T) {
 		return dnsutils.WriteMsgToTCP(c, m)
 	}
 
-	read := func(c io.Reader) (m *dns.Msg, n int, err error) {
+	read := func(c io.Reader, m *dns.Msg) (n int, err error) {
 		randSleepMs(20)
-		return dnsutils.ReadMsgFromTCP(c)
+		return dnsutils.ReadMsgFromTCP(c, m)
 	}
 
 	writeErr := func(c io.Writer, m *dns.Msg) (n int, err error) {
 		return 0, errors.New("write err")
 	}
 
-	readErr := func(c io.Reader) (m *dns.Msg, n int, err error) {
-		return nil, 0, errors.New("read err")
+	readErr := func(c io.Reader, m *dns.Msg) (n int, err error) {
+		return 0, errors.New("read err")
 	}
 
-	readTimeout := func(c io.Reader) (m *dns.Msg, n int, err error) {
+	readTimeout := func(c io.Reader, m *dns.Msg) (n int, err error) {
 		time.Sleep(time.Second * 1)
-		return nil, 0, errors.New("read err")
+		return 0, errors.New("read err")
 	}
 
 	type fields struct {
 		DialFunc       func(ctx context.Context) (net.Conn, error)
 		WriteFunc      func(c io.Writer, m *dns.Msg) (n int, err error)
-		ReadFunc       func(c io.Reader) (m *dns.Msg, n int, err error)
+		ReadFunc       func(c io.Reader, m *dns.Msg) (n int, err error)
 		MaxConns       int
 		IdleTimeout    time.Duration
 		EnablePipeline bool

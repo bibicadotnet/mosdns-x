@@ -67,15 +67,14 @@ func ReadRawMsgFromTCP(c io.Reader) (*pool.Buffer, int, error) {
 // ReadMsgFromTCP reads msg from c in RFC 1035 format (msg is prefixed
 // with a two byte length field).
 // n represents how many bytes are read from c.
-func ReadMsgFromTCP(c io.Reader) (*dns.Msg, int, error) {
+func ReadMsgFromTCP(c io.Reader, m *dns.Msg) (int, error) {
 	b, n, err := ReadRawMsgFromTCP(c)
 	if err != nil {
-		return nil, 0, err
+		return n, err
 	}
 	defer b.Release()
 
-	m, err := unpackMsgWithDetailedErr(b.Bytes())
-	return m, n, err
+	return n, m.Unpack(b.Bytes())
 }
 
 // WriteMsgToTCP packs and writes m to c in RFC 1035 format.

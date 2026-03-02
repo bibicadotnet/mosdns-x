@@ -2,19 +2,6 @@
  * Copyright (C) 2020-2022, IrineSistiana
  *
  * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 package server
@@ -41,11 +28,10 @@ type TCPConn struct {
 	sync.Mutex
 	net.Conn
 	handler dns_handler.Handler
-	meta    *C.RequestMeta
 }
 
-func (c *TCPConn) ServeDNS(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
-	return c.handler.ServeDNS(ctx, req, c.meta)
+func (c *TCPConn) ServeDNS(ctx context.Context, req *dns.Msg, meta *C.RequestMeta) (*dns.Msg, error) {
+	return c.handler.ServeDNS(ctx, req, meta)
 }
 
 func (c *TCPConn) WriteRawMsg(b []byte) (int, error) {
@@ -67,21 +53,14 @@ func (s *Server) ServeTCP(l net.Listener) error {
 		return errMissingDNSHandler
 	}
 
-	if ok := s.trackCloser(l, true); !ok {
-		return ErrServerClosed
-	}
-	defer s.trackCloser(l, false)
-
-	// handle listener
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	for {
 		c, err := l.Accept()
 		if err != nil {
-			if s.Closed() {
-				return ErrServerClosed
-			}
-			if err, ok := err.(net.Error); ok && err.Temporary() {
+			// Only continue if it's a net.Error timeout.
+			// Other fatal errors return to let the supervisor restart the process.
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
 			return fmt.Errorf("unexpected listener err: %w", err)
@@ -94,13 +73,8 @@ func (s *Server) ServeTCP(l net.Listener) error {
 func (s *Server) handleConnectionTcp(ctx context.Context, c *TCPConn) {
 	defer c.Close()
 
-	if !s.trackCloser(c, true) {
-		return
-	}
-	defer s.trackCloser(c, false)
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	connCtx, connCancel := context.WithCancel(ctx)
+	defer connCancel()
 
 	clientAddr := utils.GetAddrFromAddr(c.RemoteAddr())
 	meta := C.NewRequestMeta(clientAddr)
@@ -112,11 +86,11 @@ func (s *Server) handleConnectionTcp(ctx context.Context, c *TCPConn) {
 			handshakeTimeout = defaultTCPIdleTimeout
 		}
 
-		handshakeCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+		handshakeCtx, cancel := context.WithTimeout(connCtx, handshakeTimeout)
 		defer cancel()
 
 		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
-			s.opts.Logger.Warn("handshake failed", zap.Stringer("from", c.RemoteAddr()), zap.Error(err))
+			s.opts.Logger.Debug("handshake failed", zap.Stringer("from", c.RemoteAddr()), zap.Error(err))
 			return
 		}
 
@@ -124,32 +98,35 @@ func (s *Server) handleConnectionTcp(ctx context.Context, c *TCPConn) {
 		protocol = C.ProtocolTLS
 	}
 	meta.SetProtocol(protocol)
-	c.meta = meta
 
 	idleTimeout := s.opts.IdleTimeout
 	if idleTimeout <= 0 {
 		idleTimeout = defaultTCPIdleTimeout
 	}
 
+	// Use Go 1.21+ built-in min
 	c.SetReadDeadline(time.Now().Add(min(idleTimeout, tcpFirstReadTimeout)))
 
 	for {
-		req, _, err := dnsutils.ReadMsgFromTCP(c)
+		req := pool.GetMsg()
+		_, err := dnsutils.ReadMsgFromTCP(c, req)
 		if err != nil {
-			return // read err, close the connection
+			pool.ReleaseMsg(req)
+			return
 		}
 
-		go s.handleQueryTcp(ctx, c, req)
+		go s.handleQueryTcp(connCtx, c, req, meta)
 
 		c.SetReadDeadline(time.Now().Add(idleTimeout))
 	}
 }
 
-func (s *Server) handleQueryTcp(ctx context.Context, c *TCPConn, req *dns.Msg) {
-	r, err := c.ServeDNS(ctx, req)
+func (s *Server) handleQueryTcp(ctx context.Context, c *TCPConn, req *dns.Msg, meta *C.RequestMeta) {
+	defer pool.ReleaseMsg(req)
+
+	r, err := c.ServeDNS(ctx, req, meta)
 	if err != nil {
-		s.opts.Logger.Warn("handler err", zap.Error(err))
-		c.Close()
+		s.opts.Logger.Debug("handler err", zap.Error(err))
 		return
 	}
 
@@ -162,7 +139,7 @@ func (s *Server) handleQueryTcp(ctx context.Context, c *TCPConn, req *dns.Msg) {
 
 	_, err = c.WriteRawMsg(b)
 	if err != nil {
-		s.opts.Logger.Warn("failed to write response", zap.Stringer("client", c.RemoteAddr()), zap.Error(err))
+		s.opts.Logger.Debug("failed to write response", zap.Stringer("client", c.RemoteAddr()), zap.Error(err))
 		return
 	}
 }

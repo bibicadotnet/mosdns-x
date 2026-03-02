@@ -27,6 +27,8 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/miekg/dns"
 
@@ -138,7 +140,9 @@ func (p *reverseLookup) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func (p *reverseLookup) lookup(n netip.Addr) string {
-	v, _, _ := p.c.Get(as16(n).String())
+	b := n.As16()
+	h := xxhash.Sum64(b[:])
+	v, _, _ := p.c.Get(h)
 	return string(v)
 }
 
@@ -175,7 +179,7 @@ func (p *reverseLookup) saveIPs(q, r *dns.Msg) {
 		return
 	}
 
-	now := time.Now()
+	nowUnix := time.Now().Unix()
 	for _, rr := range r.Answer {
 		var ip net.IP
 		switch rr := rr.(type) {
@@ -195,11 +199,15 @@ func (p *reverseLookup) saveIPs(q, r *dns.Msg) {
 		if int(h.Ttl) > p.args.TTL {
 			h.Ttl = uint32(p.args.TTL)
 		}
-		name := h.Name
+		var name string
 		if len(q.Question) == 1 {
 			name = q.Question[0].Name
+		} else {
+			name = h.Name
 		}
-		p.c.Store(as16(addr).String(), []byte(name), now, now.Add(time.Duration(p.args.TTL)*time.Second))
+		ipBytes := addr.As16()
+		id := xxhash.Sum64(ipBytes[:])
+		p.c.Store(id, []byte(name), nowUnix, nowUnix+int64(p.args.TTL))
 	}
 }
 

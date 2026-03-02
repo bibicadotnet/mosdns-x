@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package misc_optm
 
 import (
@@ -25,17 +6,12 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/pmkol/mosdns-x/coremain"
-	"github.com/pmkol/mosdns-x/pkg/dnsutils"
 	"github.com/pmkol/mosdns-x/pkg/executable_seq"
 	"github.com/pmkol/mosdns-x/pkg/query_context"
 )
 
 const (
 	PluginType = "misc_optm"
-)
-
-const (
-	maxUDPSize = 1232 // 1280 (min ipv6 mtu) - 40 (ipv6 header) - 8 (udp header)
 )
 
 func init() {
@@ -53,7 +29,9 @@ type optm struct {
 func (t *optm) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	q := qCtx.Q()
 
-	// Block query that is unusual.
+	// 1. GATEKEEPER: Strict header and structure validation.
+	// Filter out malformed or unusual queries early to protect downstream plugins.
+	// After this, downstream plugins can safely assume q.Question[0] is valid.
 	if isUnusualQuery(q) {
 		r := new(dns.Msg)
 		r.SetRcode(q, dns.RcodeRefused)
@@ -61,39 +39,31 @@ func (t *optm) Exec(ctx context.Context, qCtx *query_context.Context, next execu
 		return nil
 	}
 
-	// limit edns0 udp size.
-	if opt := q.IsEdns0(); opt != nil {
-		if opt.UDPSize() > maxUDPSize {
-			opt.SetUDPSize(maxUDPSize)
-		}
-	}
-
-	if err := executable_seq.ExecChainNode(ctx, qCtx, next); err != nil {
-		return err
-	}
-
-	r := qCtx.R()
-	if r == nil {
-		return nil
-	}
-
-	// Remove padding
-	if rOpt := r.IsEdns0(); rOpt != nil {
-		dnsutils.RemoveEDNS0Option(rOpt, dns.EDNS0PADDING)
-	}
-
-	// EDNS0 consistency
-	if qOpt := q.IsEdns0(); qOpt == nil {
-		dnsutils.RemoveEDNS0(r)
-	}
-	return nil
+	// Request-side EDNS logic is removed as it's redundant with the user's phase-based design.
+	// Handover to downstream plugins (Cache, Forwarder, ECS, etc.)
+	return executable_seq.ExecChainNode(ctx, qCtx, next)
 }
 
+// isUnusualQuery performs strict DNS hygiene checks according to RFC 1035.
 func isUnusualQuery(q *dns.Msg) bool {
-	return !isValidQuery(q) || len(q.Question) != 1 || q.Question[0].Qclass != dns.ClassINET
-}
+	// Header Flags Check:
+	// - Response: Must be 0 (Query).
+	// - Opcode: Must be 0 (Standard Query).
+	// - AA, TC, RA: Must be 0 in a query. If set, the query is malformed.
+	// - Zero: Reserved Z bits must be 0.
+	if q.Response || q.Opcode != dns.OpcodeQuery ||
+		q.Authoritative || q.Truncated || q.RecursionAvailable || q.Zero {
+		return true
+	}
 
-func isValidQuery(q *dns.Msg) bool {
-	return !q.Response && q.Opcode == dns.OpcodeQuery && !q.Authoritative && !q.Zero && // check header
-		len(q.Answer) == 0 && len(q.Ns) == 0 // check body
+	// Body Structure Check:
+	// - Exactly one question is required for standard processing.
+	// - Qclass must be INET.
+	// - Answer and Authority sections must be empty for a clean query.
+	if len(q.Question) != 1 || q.Question[0].Qclass != dns.ClassINET ||
+		len(q.Answer) != 0 || len(q.Ns) != 0 {
+		return true
+	}
+
+	return false
 }

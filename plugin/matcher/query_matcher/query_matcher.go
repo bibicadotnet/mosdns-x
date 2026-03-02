@@ -1,20 +1,7 @@
 /*
- * Copyright (C) 2020-2022, IrineSistiana
+ * Copyright (C) 2020-2026, IrineSistiana
  *
  * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 package querymatcher
@@ -40,16 +27,17 @@ const PluginType = "query_matcher"
 func init() {
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(Args) })
 
+	// Optimized presets using specialized structs for maximum performance
 	coremain.RegNewPersetPluginFunc(
 		"_qtype_A_AAAA",
 		func(bp *coremain.BP) (coremain.Plugin, error) {
-			return newQueryMatcher(bp, &Args{QType: []int{int(dns.TypeA), int(dns.TypeAAAA)}})
+			return &qTypeA_AAAA{BP: bp}, nil
 		},
 	)
 	coremain.RegNewPersetPluginFunc(
 		"_qtype_AAAA",
 		func(bp *coremain.BP) (coremain.Plugin, error) {
-			return newQueryMatcher(bp, &Args{QType: []int{int(dns.TypeAAAA)}})
+			return &qTypeAAAA{BP: bp}, nil
 		},
 	)
 
@@ -69,7 +57,6 @@ type Args struct {
 	Domain   []string `yaml:"domain"`
 	QType    []int    `yaml:"qtype"`
 	QClass   []int    `yaml:"qclass"`
-	// TODO: Add PTR matcher.
 }
 
 type queryMatcher struct {
@@ -84,6 +71,13 @@ func (m *queryMatcher) Match(ctx context.Context, qCtx *query_context.Context) (
 	return executable_seq.LogicalAndMatcherGroup(ctx, qCtx, m.matcherGroup)
 }
 
+func (m *queryMatcher) Close() error {
+	for _, closer := range m.closer {
+		_ = closer.Close()
+	}
+	return nil
+}
+
 func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
 	return newQueryMatcher(bp, args.(*Args))
 }
@@ -92,6 +86,7 @@ func newQueryMatcher(bp *coremain.BP, args *Args) (m *queryMatcher, err error) {
 	m = new(queryMatcher)
 	m.BP = bp
 	m.args = args
+
 	if len(args.ClientIP) > 0 {
 		l, err := netlist.BatchLoadProvider(args.ClientIP, bp.M().GetDataManager())
 		if err != nil {
@@ -123,23 +118,35 @@ func newQueryMatcher(bp *coremain.BP, args *Args) (m *queryMatcher, err error) {
 		bp.L().Info("domain matcher loaded", zap.Int("length", mg.Len()))
 	}
 	if len(args.QType) > 0 {
-		elemMatcher := elem.NewIntMatcher(args.QType)
-		m.matcherGroup = append(m.matcherGroup, msg_matcher.NewQTypeMatcher(elemMatcher))
+		m.matcherGroup = append(m.matcherGroup, msg_matcher.NewQTypeMatcher(elem.NewIntMatcher(args.QType)))
 	}
 	if len(args.QClass) > 0 {
-		elemMatcher := elem.NewIntMatcher(args.QClass)
-		m.matcherGroup = append(m.matcherGroup, msg_matcher.NewQClassMatcher(elemMatcher))
+		m.matcherGroup = append(m.matcherGroup, msg_matcher.NewQClassMatcher(elem.NewIntMatcher(args.QClass)))
 	}
 
 	return m, nil
 }
 
-var _ coremain.MatcherPlugin = (*queryMatcher)(nil)
+// ----------------------------------------------------------------------------
+// Performance Optimized Preset Matchers
+// Logic Invariant: Only executed after entry_handler gatekeeper validation.
+// ----------------------------------------------------------------------------
 
-type queryIsEDNS0 struct {
-	*coremain.BP
+type qTypeA_AAAA struct{ *coremain.BP }
+
+func (m *qTypeA_AAAA) Match(_ context.Context, qCtx *query_context.Context) (bool, error) {
+	t := qCtx.Q().Question[0].Qtype
+	return t == dns.TypeA || t == dns.TypeAAAA, nil
 }
 
-func (q *queryIsEDNS0) Match(_ context.Context, qCtx *query_context.Context) (matched bool, err error) {
+type qTypeAAAA struct{ *coremain.BP }
+
+func (m *qTypeAAAA) Match(_ context.Context, qCtx *query_context.Context) (bool, error) {
+	return qCtx.Q().Question[0].Qtype == dns.TypeAAAA, nil
+}
+
+type queryIsEDNS0 struct{ *coremain.BP }
+
+func (q *queryIsEDNS0) Match(_ context.Context, qCtx *query_context.Context) (bool, error) {
 	return qCtx.Q().IsEdns0() != nil, nil
 }

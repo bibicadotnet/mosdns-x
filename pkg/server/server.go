@@ -1,28 +1,7 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package server
 
 import (
 	"errors"
-	"io"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -32,7 +11,6 @@ import (
 )
 
 var (
-	ErrServerClosed       = errors.New("server closed")
 	errMissingHTTPHandler = errors.New("missing http handler")
 	errMissingDNSHandler  = errors.New("missing dns handler")
 )
@@ -51,18 +29,12 @@ type ServerOpts struct {
 	HttpHandler *H.Handler
 
 	// Certificate files to start DoT, DoH server.
-	// Only useful if there is no server certificate specified in TLSConfig.
 	Cert, Key string
 
-	// KernelTX and KernelRX control whether kernel TLS offloading is enabled
-	// If the kernel is not supported, it is automatically downgraded to the application implementation
-	//
-	// If this option is enabled, please mount the TLS module before you run application.
-	// On Linux, it will try to automatically mount the tls kernel module.
+	// KernelTX and KernelRX control whether kernel TLS offloading is enabled.
 	KernelRX, KernelTX bool
 
-	// IdleTimeout limits the maximum time period that a connection
-	// can idle. Default is defaultTCPIdleTimeout.
+	// IdleTimeout limits the maximum time period that a connection can idle.
 	IdleTimeout time.Duration
 }
 
@@ -76,65 +48,13 @@ func (opts *ServerOpts) init() {
 	}
 }
 
-// Server is a DNS server.
-// It's functions, Server.ServeUDP etc., will block and
-// close the net.Listener/net.PacketConn and always return
-// a non-nil error. If Server was closed, the returned err
-// will be ErrServerClosed.
 type Server struct {
 	opts ServerOpts
-
-	m             sync.Mutex
-	closed        bool
-	closerTracker map[io.Closer]struct{}
 }
 
 func NewServer(opts ServerOpts) *Server {
 	opts.init()
 	return &Server{
 		opts: opts,
-	}
-}
-
-// Closed returns true if server was closed.
-func (s *Server) Closed() bool {
-	s.m.Lock()
-	defer s.m.Unlock()
-	return s.closed
-}
-
-// trackCloser adds or removes c to the Server and return true if Server is not closed.
-// We use a pointer in case the underlying value is incomparable.
-func (s *Server) trackCloser(c io.Closer, add bool) bool {
-	s.m.Lock()
-	defer s.m.Unlock()
-
-	if s.closerTracker == nil {
-		s.closerTracker = make(map[io.Closer]struct{})
-	}
-
-	if add {
-		if s.closed {
-			return false
-		}
-		s.closerTracker[c] = struct{}{}
-	} else {
-		delete(s.closerTracker, c)
-	}
-	return true
-}
-
-// Close closes the Server and all its inner listeners.
-func (s *Server) Close() {
-	s.m.Lock()
-	defer s.m.Unlock()
-
-	if s.closed {
-		return
-	}
-
-	s.closed = true
-	for closer := range s.closerTracker {
-		closer.Close()
 	}
 }

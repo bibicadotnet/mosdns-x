@@ -4,14 +4,13 @@ on:
   workflow_dispatch:
 
 jobs:
-
   build-release:
     runs-on: ubuntu-24.04
     steps:
       - name: get latest go version
         id: go
         run: |
-          echo version=1.25.5 >> $GITHUB_OUTPUT
+          echo version=1.26 >> $GITHUB_OUTPUT
 
       - name: Set up Go
         uses: actions/setup-go@v5.5.0
@@ -28,6 +27,15 @@ jobs:
         with:
           python-version: '3.8'
 
+      - name: Prepare PGO Profile
+        run: |
+          if [ -f "cpu.pprof" ]; then
+            go tool pprof -proto cpu.pprof > default.pgo
+          else
+            echo "Error: cpu.pprof not found in root directory"
+            exit 1
+          fi
+
       - name: Build
         run: |
           echo "TAG_NAME=v$(date +'%y.%m.%d')" >> "$GITHUB_ENV"
@@ -35,7 +43,7 @@ jobs:
         env:
           CGO_ENABLED: '0'
           GOEXPERIMENT: greenteagc
-          TZ: Asia/Hong_Kong
+          TZ: Asia/Ho_Chi_Minh
 
       - name: Publish
         uses: softprops/action-gh-release@v1
@@ -43,6 +51,5 @@ jobs:
           name: Mosdns-x ${{ env.TAG_NAME }}
           tag_name: ${{ env.TAG_NAME }}
           files: './release/mosdns*.zip'
-          prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

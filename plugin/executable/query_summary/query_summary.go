@@ -2,25 +2,13 @@
  * Copyright (C) 2020-2022, IrineSistiana
  *
  * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 package query_summary
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -58,7 +46,6 @@ type logger struct {
 	*coremain.BP
 }
 
-// Init is a handler.NewPluginFunc.
 func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
 	return newLogger(bp, args.(*Args)), nil
 }
@@ -70,26 +57,35 @@ func newLogger(bp *coremain.BP, args *Args) coremain.Plugin {
 
 func (l *logger) Exec(ctx context.Context, qCtx *C.Context, next executable_seq.ExecutableChainNode) error {
 	err := executable_seq.ExecChainNode(ctx, qCtx, next)
-
+	
 	q := qCtx.Q()
 	if len(q.Question) != 1 {
-		return nil
+		return err
 	}
+	
+	// Skip logging for context cancellation/timeout (expected during client disconnect)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+	}
+	
 	question := q.Question[0]
 	respRcode := -1
 	if r := qCtx.R(); r != nil {
 		respRcode = r.Rcode
 	}
-
+	
 	inboundInfo := []zap.Field{
 		zap.Uint32("uqid", qCtx.Id()),
-		zap.Stringer("client", qCtx.ReqMeta().GetClientAddr()),
 		zap.String("protocol", qCtx.ReqMeta().GetProtocol()),
 	}
+	
 	switch qCtx.ReqMeta().GetProtocol() {
 	case C.ProtocolHTTPS, C.ProtocolH2, C.ProtocolH3, C.ProtocolQUIC, C.ProtocolTLS:
 		inboundInfo = append(inboundInfo, zap.String("server_name", qCtx.ReqMeta().GetServerName()))
 	}
+	
 	l.BP.L().Info(
 		l.args.Msg,
 		append(inboundInfo,
@@ -100,5 +96,6 @@ func (l *logger) Exec(ctx context.Context, qCtx *C.Context, next executable_seq.
 			zap.Duration("elapsed", time.Since(qCtx.StartTime())),
 			zap.Error(err))...,
 	)
+	
 	return err
 }

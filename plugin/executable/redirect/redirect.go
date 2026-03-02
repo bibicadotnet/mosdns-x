@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package redirect
 
 import (
@@ -91,7 +72,8 @@ func newRedirect(bp *coremain.BP, args *Args) (*redirectPlugin, error) {
 
 func (r *redirectPlugin) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	q := qCtx.Q()
-	if len(q.Question) != 1 || q.Question[0].Qclass != dns.ClassINET {
+	// Guard: Minimal safety for INET queries
+	if q == nil || len(q.Question) != 1 || q.Question[0].Qclass != dns.ClassINET {
 		return executable_seq.ExecChainNode(ctx, qCtx, next)
 	}
 
@@ -101,30 +83,51 @@ func (r *redirectPlugin) Exec(ctx context.Context, qCtx *query_context.Context, 
 		return executable_seq.ExecChainNode(ctx, qCtx, next)
 	}
 
+	// PHASE 1: Forward Path - Rewrite Request
 	q.Question[0].Name = redirectTarget
 	err := executable_seq.ExecChainNode(ctx, qCtx, next)
-	if r := qCtx.R(); r != nil {
-		// Restore original query name.
-		for i := range r.Question {
-			if r.Question[i].Name == redirectTarget {
-				r.Question[i].Name = orgQName
-			}
+
+	// PHASE 2: Reverse Path - Restore Protocol Integrity
+	resp := qCtx.R()
+	if resp == nil {
+		return err
+	}
+
+	// Deterministic Restore: Force orgQName on Question section.
+	// Faster than string comparison and resilient against upstream normalization.
+	if len(resp.Question) > 0 {
+		resp.Question[0].Name = orgQName
+	}
+
+	// Early exit if no answers exist (e.g., NXDOMAIN, SERVFAIL, NODATA)
+	if len(resp.Answer) == 0 {
+		return err
+	}
+
+	// PHASE 3: High-Performance Filtering (In-place & Zero-allocation)
+	// Uses index-based loop for better CPU cache utilization and branch prediction.
+	ans := resp.Answer
+	n := 0
+	for i := 0; i < len(ans); i++ {
+		rr := ans[i]
+		h := rr.Header() // Header is never nil for valid DNS RRs decoded by mosdns
+
+		// Stealth: Strip CNAME records to hide internal redirection logic
+		if h.Rrtype == dns.TypeCNAME {
+			continue
 		}
 
-		// Insert a CNAME record.
-		newAns := make([]dns.RR, 1, len(r.Answer)+1)
-		newAns[0] = &dns.CNAME{
-			Hdr: dns.RR_Header{
-				Name:   orgQName,
-				Rrtype: dns.TypeCNAME,
-				Class:  dns.ClassINET,
-				Ttl:    1,
-			},
-			Target: redirectTarget,
+		// Flattening: Rewrite record name back to the original query name (Pointer swap)
+		if h.Name == redirectTarget {
+			h.Name = orgQName
 		}
-		newAns = append(newAns, r.Answer...)
-		r.Answer = newAns
+
+		ans[n] = rr
+		n++
 	}
+	// Truncate the slice to the filtered length
+	resp.Answer = ans[:n]
+
 	return err
 }
 

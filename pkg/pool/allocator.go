@@ -1,41 +1,18 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-//     This file is a modified version from https://github.com/xtaci/smux/blob/master/alloc.go f386d90
-//     license of smux: MIT https://github.com/xtaci/smux/blob/master/LICENSE
-
 package pool
 
 import (
-	"fmt"
-	"math"
 	"math/bits"
 	"sync"
 )
 
-const intSize = 32 << (^uint(0) >> 63)
+// Limit pool to 12 bits (4KB). 
+// Optimized for DNS workloads (UDP/DoH/DoT/DoQ).
+const maxDNSPoolBits = 12
 
-// defaultBufPool is an Allocator that has a maximum capacity.
-var defaultBufPool = NewAllocator(intSize - 1)
+// defaultBufPool manages 13 shards (2^0 to 2^12).
+var defaultBufPool = NewAllocator(maxDNSPoolBits)
 
-// GetBuf returns a *Buffer from pool with most appropriate cap.
-// It panics if size < 0.
+// GetBuf returns a *Buffer from the default pool with the most appropriate capacity.
 func GetBuf(size int) *Buffer {
 	return defaultBufPool.Get(size)
 }
@@ -45,46 +22,41 @@ type Allocator struct {
 	buffers    []sync.Pool
 }
 
-// NewAllocator initiates a []byte allocatorL.
-// []byte that has less than 1 << maxPoolBitsLen bytes is managed by sync.Pool.
-// The waste(memory fragmentation) of space allocation is guaranteed to be
-// no more than 50%.
+// NewAllocator initiates a byte buffer allocator.
 func NewAllocator(maxPoolBitsLen int) *Allocator {
-	if maxPoolBitsLen > intSize-1 || maxPoolBitsLen <= 0 {
-		panic("invalid pool length")
+	if maxPoolBitsLen <= 0 || maxPoolBitsLen > 12 {
+		maxPoolBitsLen = 12
 	}
 
 	ml := 1 << maxPoolBitsLen
-	if maxPoolBitsLen == intSize-1 {
-		ml = math.MaxInt
-	}
 	alloc := &Allocator{
 		maxPoolLen: ml,
 		buffers:    make([]sync.Pool, maxPoolBitsLen+1),
 	}
 
 	for i := range alloc.buffers {
-		var bufSize int
-		if i == intSize-1 {
-			bufSize = math.MaxInt
-		} else {
-			bufSize = 1 << i
-		}
+		// Fix closure capture by defining 'size' inside the loop.
+		size := 1 << i
 		alloc.buffers[i].New = func() interface{} {
-			return newBuffer(alloc, make([]byte, bufSize))
+			return newBuffer(alloc, make([]byte, size))
 		}
 	}
 	return alloc
 }
 
-// Get returns a []byte from pool with most appropriate cap
+// Get returns a *Buffer from the pool. 
+// Fallback to direct allocation (a == nil) if size exceeds maxPoolLen.
 func (alloc *Allocator) Get(size int) *Buffer {
 	if size < 0 {
-		panic(fmt.Sprintf("invalid slice size %d", size))
+		size = 0
 	}
 
 	if size > alloc.maxPoolLen {
-		panic(fmt.Sprintf("slice size %d is too large", size))
+		return &Buffer{
+			a: nil, 
+			l: size,
+			b: make([]byte, size),
+		}
 	}
 
 	i := shard(size)
@@ -93,27 +65,40 @@ func (alloc *Allocator) Get(size int) *Buffer {
 	return buf
 }
 
-// Release releases the buf to the allocatorL.
+// Release returns the buffer to the pool. Safely ignores unmanaged or invalid buffers.
 func (alloc *Allocator) Release(buf *Buffer) {
-	c := buf.Cap()
-	i := shard(c)
-	if c == 0 || c > alloc.maxPoolLen || c != 1<<i {
-		panic("unexpected cap size")
+	if buf == nil || buf.a == nil {
+		return
 	}
+
+	c := buf.Cap()
+	if c == 0 || c > alloc.maxPoolLen {
+		return
+	}
+
+	i := shard(c)
+	// Fragmentation check: Only pool buffers matching power-of-two shards.
+	if c != (1 << i) {
+		return
+	}
+
+	// Reset logical length to 0 before returning to pool.
+	// This maintains the invariant that a free buffer is an empty buffer.
+	buf.l = 0 
 	alloc.buffers[i].Put(buf)
 }
 
-// shard returns the shard index that is suitable for the size.
+// shard returns the shard index suitable for the size.
 func shard(size int) int {
 	if size <= 1 {
 		return 0
 	}
-	return bits.Len64(uint64(size - 1))
+	return bits.Len(uint(size - 1))
 }
 
+// Buffer wraps a byte slice with its allocator reference.
 type Buffer struct {
 	a *Allocator
-
 	l int
 	b []byte
 }
@@ -126,29 +111,22 @@ func newBuffer(a *Allocator, b []byte) *Buffer {
 	}
 }
 
+// SetLen adjusts the logical length of the buffer.
 func (b *Buffer) SetLen(l int) {
 	if l > len(b.b) {
-		panic("buffer length overflowed")
+		l = len(b.b)
 	}
 	b.l = l
 }
 
-func (b *Buffer) AllBytes() []byte {
-	return b.b
-}
+func (b *Buffer) AllBytes() []byte { return b.b }
+func (b *Buffer) Bytes() []byte    { return b.b[:b.l] }
+func (b *Buffer) Len() int         { return b.l }
+func (b *Buffer) Cap() int         { return cap(b.b) }
 
-func (b *Buffer) Bytes() []byte {
-	return b.b[:b.l]
-}
-
-func (b *Buffer) Len() int {
-	return b.l
-}
-
-func (b *Buffer) Cap() int {
-	return cap(b.b)
-}
-
+// Release returns the buffer to its allocator.
 func (b *Buffer) Release() {
-	b.a.Release(b)
+	if b.a != nil {
+		b.a.Release(b)
+	}
 }

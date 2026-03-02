@@ -1,30 +1,12 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package doh
 
 import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/url"
-	"strconv"
+	"strings"
 
 	"github.com/miekg/dns"
 	"gitlab.com/go-extension/http"
@@ -35,15 +17,18 @@ import (
 
 const dnsContentType = "application/dns-message"
 
-var bufPool = pool.NewBytesBufPool(65535)
+var defaultUserAgent = fmt.Sprintf("mosdns-x/%s", C.Version)
 
 type Upstream struct {
-	url       *url.URL
+	urlStr    string
 	transport *http.Transport
 }
 
 func NewUpstream(url *url.URL, transport *http.Transport) *Upstream {
-	return &Upstream{url, transport}
+	return &Upstream{
+		urlStr:    url.String(),
+		transport: transport,
+	}
 }
 
 func (u *Upstream) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
@@ -53,38 +38,44 @@ func (u *Upstream) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, e
 		return nil, err
 	}
 	defer buf.Release()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.url.String(), bytes.NewReader(wire))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.urlStr, bytes.NewReader(wire))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", dnsContentType)
 	req.Header.Set("Accept", dnsContentType)
-	req.Header.Set("User-Agent", fmt.Sprintf("mosdns-x/%s", C.Version))
+	req.Header.Set("User-Agent", defaultUserAgent)
+
 	res, err := u.transport.RoundTrip(req)
 	if err != nil {
 		return nil, err
 	}
-	if res.StatusCode != 200 {
-		return nil, fmt.Errorf("unexpected status %v: %s", res.StatusCode, res.Status)
-	}
-	if contentType := res.Header.Get("Content-Type"); contentType != dnsContentType {
-		return nil, fmt.Errorf("unexpected content type: %s", contentType)
-	}
-	if contentLength := res.Header.Get("Content-Length"); contentLength != "" {
-		if length, err := strconv.Atoi(contentLength); err == nil && length == 0 {
-			return nil, fmt.Errorf("empty response")
-		}
-	}
 	defer res.Body.Close()
-	bb := bufPool.Get()
-	defer bufPool.Release(bb)
-	_, err = bb.ReadFrom(res.Body)
+
+	if res.StatusCode < 200 || res.StatusCode > 299 {
+		return nil, fmt.Errorf("http %d", res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, dnsContentType) {
+		return nil, fmt.Errorf("invalid content-type: %s", ct)
+	}
+
+	// Use runtime allocator instead of pool for better memory efficiency.
+	// DNS responses are typically 50-4096 bytes, well within runtime's
+	// efficient allocation range.
+	respBytes, err := io.ReadAll(io.LimitReader(res.Body, 4097))
 	if err != nil {
 		return nil, err
 	}
+	if len(respBytes) > 4096 {
+		return nil, fmt.Errorf("response too large: %d bytes", len(respBytes))
+	}
+	if len(respBytes) == 0 {
+		return nil, fmt.Errorf("empty response")
+	}
+
 	r := new(dns.Msg)
-	err = r.Unpack(bb.Bytes())
-	if err != nil {
+	if err := r.Unpack(respBytes); err != nil {
 		return nil, err
 	}
 	return r, nil

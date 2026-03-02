@@ -1,27 +1,12 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package bundled_upstream
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
@@ -30,15 +15,8 @@ import (
 )
 
 type Upstream interface {
-	// Exchange sends q to the upstream and waits for response.
-	// If any error occurs. Implements must return a nil msg with a non nil error.
-	// Otherwise, Implements must a msg with nil error.
 	Exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
-
-	// Trusted indicates whether this Upstream is trusted/reliable.
-	// If true, responses from this Upstream will be accepted without checking its rcode.
 	Trusted() bool
-
 	Address() string
 }
 
@@ -49,54 +27,144 @@ type parallelResult struct {
 }
 
 var nopLogger = zap.NewNop()
-
 var ErrAllFailed = errors.New("all upstreams failed")
 
+const (
+	priorityServFail = 0
+	priorityOther    = 1
+	priorityNoData   = 2
+	priorityNXDomain = 3
+)
+
+// ExchangeParallel executes multiple DNS exchanges in parallel.
 func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstreams []Upstream, logger *zap.Logger) (*dns.Msg, error) {
 	if logger == nil {
 		logger = nopLogger
 	}
 
-	q := qCtx.Q()
 	t := len(upstreams)
-	if t == 1 {
-		return upstreams[0].Exchange(ctx, q)
+	if t == 0 {
+		return nil, ErrAllFailed
 	}
 
-	c := make(chan *parallelResult, t) // use buf chan to avoid blocking.
-	qCopy := q.Copy()                  // qCtx is not safe for concurrent use.
+	q := qCtx.Q()
+	exchangeStart := time.Now()
+	if t == 1 {
+		r, err := upstreams[0].Exchange(ctx, q)
+		if elapsed := time.Since(exchangeStart); elapsed > 500*time.Millisecond {
+			logger.Warn("slow upstream exchange", qCtx.InfoField(), zap.Duration("elapsed", elapsed), zap.String("upstream", upstreams[0].Address()))
+		}
+		return r, err
+	}
+
+	taskCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	c := make(chan *parallelResult, t)
+
 	for _, u := range upstreams {
 		u := u
+		qCopy := q.Copy()
+		wg.Add(1)
 		go func() {
-			r, err := u.Exchange(ctx, qCopy)
-			c <- &parallelResult{
-				r:    r,
-				err:  err,
-				from: u,
+			defer wg.Done()
+			r, err := u.Exchange(taskCtx, qCopy)
+			select {
+			case c <- &parallelResult{r: r, err: err, from: u}:
+			case <-taskCtx.Done():
+				return
 			}
 		}()
 	}
 
-	for i := 0; i < t; i++ {
-		select {
-		case res := <-c:
-			if res.err != nil {
-				logger.Warn("upstream err", qCtx.InfoField(), zap.String("addr", res.from.Address()))
-				continue
-			}
+	go func() {
+		wg.Wait()
+		close(c)
+	}()
 
-			if res.r == nil {
-				continue
-			}
+	var errMsgs []string
+	var bestFallbackRes *dns.Msg
+	var bestPrio = -1
 
-			if res.from.Trusted() || res.r.Rcode == dns.RcodeSuccess {
-				return res.r, nil
+	for res := range c {
+		// === Phase 1: Network/Timeout Errors ===
+		if res.err != nil {
+			if errors.Is(res.err, context.Canceled) {
+				logger.Debug("upstream exchange canceled", qCtx.InfoField(), zap.String("addr", res.from.Address()))
+			} else {
+				errMsgs = append(errMsgs, fmt.Sprintf("[%s: %v]", res.from.Address(), res.err))
+				logger.Warn("upstream exchange failed", qCtx.InfoField(), zap.String("addr", res.from.Address()), zap.Error(res.err))
 			}
 			continue
-
-		case <-ctx.Done():
-			return nil, ctx.Err()
 		}
+
+		if res.r == nil {
+			continue
+		}
+
+		// === Phase 2: Success Racing (Fast Path) ===
+		// Return immediately if any response has answer records.
+		if res.r.Rcode == dns.RcodeSuccess && len(res.r.Answer) > 0 {
+			cancel()
+			return res.r, nil
+		}
+
+		// === Phase 3: Semantic Fallback Collection ===
+		// If no answer yet, track the best non-answer response.
+		newPrio := getResponsePriority(res.r)
+		if bestFallbackRes == nil || newPrio > bestPrio {
+			bestFallbackRes = res.r
+			bestPrio = newPrio
+		}
+
+		// Log non-answer responses for debugging.
+		status := getRcodeStatus(res.r)
+		logger.Debug("upstream returned non-answer response",
+			qCtx.InfoField(),
+			zap.String("addr", res.from.Address()),
+			zap.String("status", status))
 	}
-	return nil, ErrAllFailed
+
+	// === Phase 4: Final Result Selection ===
+	// 1. Best semantic error (NXDOMAIN > NODATA > SERVFAIL)
+	if bestFallbackRes != nil {
+		return bestFallbackRes, nil
+	}
+
+	// 2. Parent context termination (Timeout or Manual Cancel)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// 3. All upstreams failed (Network errors)
+	var detailedErr error
+	if len(errMsgs) > 0 {
+		detailedErr = fmt.Errorf("%w: %s", ErrAllFailed, strings.Join(errMsgs, ", "))
+	} else {
+		detailedErr = ErrAllFailed
+	}
+
+	logger.Warn("all upstreams failed completely", qCtx.InfoField(), zap.Error(detailedErr))
+	return nil, detailedErr
+}
+
+func getResponsePriority(r *dns.Msg) int {
+	switch r.Rcode {
+	case dns.RcodeNameError:
+		return priorityNXDomain
+	case dns.RcodeSuccess:
+		return priorityNoData
+	case dns.RcodeServerFailure:
+		return priorityServFail
+	default:
+		return priorityOther
+	}
+}
+
+func getRcodeStatus(r *dns.Msg) string {
+	if r.Rcode == dns.RcodeSuccess && len(r.Answer) == 0 {
+		return "NODATA"
+	}
+	return dns.RcodeToString[r.Rcode]
 }

@@ -243,7 +243,9 @@ func NewUpstream(addr string, opt *Opt) (Upstream, error) {
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return d.DialContext(ctx, "tcp", dialAddr)
 			},
-			IdleConnTimeout: idleConnTimeout,
+			ResponseHeaderTimeout: 7 * time.Second,  // <= server timeout (10s)
+			ExpectContinueTimeout: time.Second,
+			IdleConnTimeout:       idleConnTimeout,
 		}), nil
 	case "https", "h2", "doh":
 		idleConnTimeout := time.Second * 30
@@ -266,8 +268,11 @@ func NewUpstream(addr string, opt *Opt) (Upstream, error) {
 				}
 				return tlsConn, nil
 			},
-			IdleConnTimeout:   idleConnTimeout,
-			ForceAttemptHTTP2: true,
+			TLSHandshakeTimeout:   3 * time.Second,
+			ResponseHeaderTimeout: 7 * time.Second,  // <= server timeout (10s)
+			ExpectContinueTimeout: time.Second,
+			IdleConnTimeout:       idleConnTimeout,
+			ForceAttemptHTTP2:     true,
 		}), nil
 	case "h3", "doh3":
 		idleConnTimeout := time.Second * 30
@@ -311,6 +316,10 @@ func createTLSConfig(opt *Opt, alpn string, serverName string) *tls.Config {
 		NextProtos:         []string{alpn},
 		ServerName:         serverName,
 		ClientSessionCache: tls.NewLRUClientSessionCache(64),
+		CurvePreferences: []tls.CurveID{
+			tls.X25519,
+			tls.CurveP256,
+		},
 	}
 	return config
 }
@@ -324,6 +333,10 @@ func createETLSConfig(opt *Opt, alpn string, serverName string) *eTLS.Config {
 		NextProtos:         []string{alpn},
 		ServerName:         serverName,
 		ClientSessionCache: eTLS.NewLRUClientSessionCache(64),
+		CurvePreferences: []eTLS.CurveID{
+			eTLS.X25519,
+			eTLS.CurveP256,
+		},
 	}
 	return config
 }

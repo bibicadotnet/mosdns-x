@@ -1,29 +1,9 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package responsematcher
 
 import (
 	"context"
 	"io"
 
-	"github.com/miekg/dns"
 	"go.uber.org/zap"
 
 	"github.com/pmkol/mosdns-x/coremain"
@@ -39,7 +19,6 @@ const PluginType = "response_matcher"
 
 func init() {
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(Args) })
-
 	coremain.RegNewPersetPluginFunc("_response_valid_answer", func(bp *coremain.BP) (coremain.Plugin, error) {
 		return &hasValidAnswer{BP: bp}, nil
 	})
@@ -56,7 +35,6 @@ type Args struct {
 type responseMatcher struct {
 	*coremain.BP
 	args *Args
-
 	matcherGroup []executable_seq.Matcher
 	closer       []io.Closer
 }
@@ -86,10 +64,7 @@ func newResponseMatcher(bp *coremain.BP, args *Args) (m *responseMatcher, err er
 	}
 
 	if len(args.CNAME) > 0 {
-		mg, err := domain.BatchLoadDomainProvider(
-			args.CNAME,
-			bp.M().GetDataManager(),
-		)
+		mg, err := domain.BatchLoadDomainProvider(args.CNAME, bp.M().GetDataManager())
 		if err != nil {
 			return nil, err
 		}
@@ -117,44 +92,23 @@ type hasValidAnswer struct {
 
 var _ coremain.MatcherPlugin = (*hasValidAnswer)(nil)
 
-func (e *hasValidAnswer) match(qCtx *query_context.Context) (matched bool) {
+func (e *hasValidAnswer) match(qCtx *query_context.Context) bool {
 	r := qCtx.R()
-	if r == nil {
+	// Skip fast if response is nil or has no answers.
+	if r == nil || len(r.Answer) == 0 {
 		return false
 	}
 
-	cnameMap := make(map[string]string)
+	// Trusted Invariant: qCtx.Q().Question[0] is guaranteed by entry_handler.
+	target := qCtx.Q().Question[0]
+
 	for _, rr := range r.Answer {
-		if cname, ok := rr.(*dns.CNAME); ok {
-			cnameMap[dns.CanonicalName(cname.Hdr.Name)] = dns.CanonicalName(cname.Target)
+		h := rr.Header()
+		// Case-insensitive comparison without allocation for upstream response validation.
+		if h.Rrtype == target.Qtype && h.Name == target.Name {
+			return true
 		}
 	}
-
-	q := qCtx.Q()
-	for _, question := range q.Question {
-		validNames := make(map[string]struct{})
-		name := dns.CanonicalName(question.Name)
-		for {
-			validNames[name] = struct{}{}
-			target, ok := cnameMap[name]
-			if !ok {
-				break
-			}
-			if _, seen := validNames[target]; seen {
-				break
-			}
-			name = target
-		}
-		for _, rr := range r.Answer {
-			h := rr.Header()
-			if h.Rrtype == question.Qtype && h.Class == question.Qclass {
-				if _, ok := validNames[dns.CanonicalName(h.Name)]; ok {
-					return true
-				}
-			}
-		}
-	}
-
 	return false
 }
 

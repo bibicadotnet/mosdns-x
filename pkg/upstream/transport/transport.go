@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package transport
 
 import (
@@ -25,11 +6,13 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
 
+	"github.com/pmkol/mosdns-x/pkg/pool"
 	"github.com/pmkol/mosdns-x/pkg/utils"
 )
 
@@ -42,13 +25,13 @@ var (
 
 const (
 	defaultIdleTimeout             = time.Second * 10
-	defaultDialTimeout             = time.Second * 5
-	defaultNoConnReuseQueryTimeout = time.Second * 5
+	defaultDialTimeout             = time.Second * 7
+	defaultNoConnReuseQueryTimeout = time.Second * 7
 	defaultMaxConns                = 2
 	defaultMaxQueryPerConn         = 65535
 
 	writeTimeout        = time.Second
-	connTooOldThreshold = time.Millisecond * 500
+	connTooOldThreshold = time.Millisecond * 1500
 )
 
 // Opts for Transport,
@@ -64,7 +47,7 @@ type Opts struct {
 	WriteFunc func(c io.Writer, m *dns.Msg) (int, error)
 	// ReadFunc specifies the method to read a wire dns msg from the connection
 	// opened by the DialFunc.
-	ReadFunc func(c io.Reader) (*dns.Msg, int, error)
+	ReadFunc func(c io.Reader, m *dns.Msg) (int, error)
 
 	// DialTimeout specifies the timeout for DialFunc.
 	// Default is defaultDialTimeout.
@@ -124,6 +107,8 @@ func NewTransport(opts Opts) (*Transport, error) {
 type Transport struct {
 	opts Opts
 
+	closedAtomic atomic.Bool // fast path for isClosed check
+
 	m                  sync.Mutex // protect following fields
 	closed             bool
 	pipelineConns      map[*dnsConn]*pipelineStatus
@@ -137,10 +122,7 @@ type pipelineStatus struct {
 }
 
 func (t *Transport) isClosed() bool {
-	t.m.Lock()
-	closed := t.closed
-	t.m.Unlock()
-	return closed
+	return t.closedAtomic.Load()
 }
 
 func (t *Transport) ExchangeContext(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
@@ -166,6 +148,8 @@ func (t *Transport) Close() error {
 	defer t.m.Unlock()
 
 	t.closed = true
+	t.closedAtomic.Store(true) // sync atomic flag
+
 	for conn := range t.pipelineConns {
 		delete(t.pipelineConns, conn)
 		conn.closeWithErr(errClosedTransport)
@@ -202,7 +186,8 @@ func (t *Transport) exchangeWithPipelineConn(ctx context.Context, m *dns.Msg) (*
 		wg.Done()
 
 		if err != nil {
-			if !isNewConn && attempt <= maxRetry {
+			// Tối ưu: Chặn đứng Retry nếu lỗi là context.Canceled (client đã ngắt kết nối)
+			if !isNewConn && attempt <= maxRetry && !errors.Is(err, context.Canceled) {
 				continue
 			}
 			return nil, err
@@ -232,8 +217,9 @@ func (t *Transport) exchangeWithoutConnReuse(ctx context.Context, m *dns.Msg) (*
 
 	resChan := make(chan *result, 1)
 	go func() {
-		b, _, err := t.opts.ReadFunc(conn)
-		resChan <- &result{b, err}
+		m := new(dns.Msg) // Or pool.GetMsg() if we can ensure release
+		_, err := t.opts.ReadFunc(conn, m)
+		resChan <- &result{m, err}
 	}()
 
 	select {
@@ -267,7 +253,8 @@ func (t *Transport) exchangeWithReusableConn(ctx context.Context, m *dns.Msg) (*
 		r, err := conn.exchangeConnReuse(ctx, m)
 		t.releaseReusableConn(conn, err)
 		if err != nil {
-			if !isNewConn && attempt <= maxRetry {
+			// Tối ưu: Chặn đứng Retry nếu lỗi là context.Canceled (client đã ngắt kết nối)
+			if !isNewConn && attempt <= maxRetry && !errors.Is(err, context.Canceled) {
 				continue
 			}
 			return nil, err
@@ -469,9 +456,23 @@ func (dc *dnsConn) exchange(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 		return nil, err
 	}
 
+	// Optimization: Check if response is already available before blocking on select.
+	// This prevents race condition where ctx.Done() wins over ready response.
+	select {
+	case r := <-resChan:
+		return r, nil
+	default:
+	}
+
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		// Double-check: response may have arrived during context cancellation
+		select {
+		case r := <-resChan:
+			return r, nil
+		default:
+			return nil, ctx.Err()
+		}
 	case r := <-resChan:
 		return r, nil
 	case <-dc.closeNotify:
@@ -503,21 +504,34 @@ func (dc *dnsConn) dialAndRead() {
 }
 
 func (dc *dnsConn) readLoop() {
+	dc.c.SetReadDeadline(time.Now().Add(dc.t.opts.IdleTimeout))
 	for {
-		dc.c.SetReadDeadline(time.Now().Add(dc.t.opts.IdleTimeout))
-		r, _, err := dc.t.opts.ReadFunc(dc.c)
+		r := pool.GetMsg()
+		_, err := dc.t.opts.ReadFunc(dc.c, r)
 		if err != nil {
+			pool.ReleaseMsg(r)
 			dc.closeWithErr(err) // abort this connection.
 			return
 		}
+
+		dc.c.SetReadDeadline(time.Now().Add(dc.t.opts.IdleTimeout))
 		dc.updateReadTime()
 
 		resChan := dc.getQueueC(r.Id)
+		
+		sent := false
 		if resChan != nil {
 			select {
-			case resChan <- r: // resChan has buffer
+			case resChan <- r:
+				sent = true
 			default:
+				// Buffer full, unable to send
 			}
+		}
+
+		// Fix: If not sent (resChan == nil or default case), release back to pool
+		if !sent {
+			pool.ReleaseMsg(r)
 		}
 	}
 }

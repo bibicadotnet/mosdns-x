@@ -1,37 +1,15 @@
-/*
- * Copyright (C) 2020-2025, pmkol
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
 package no_cname
 
 import (
 	"context"
 
 	"github.com/miekg/dns"
-
 	"github.com/pmkol/mosdns-x/coremain"
 	"github.com/pmkol/mosdns-x/pkg/executable_seq"
 	"github.com/pmkol/mosdns-x/pkg/query_context"
 )
 
-const (
-	PluginType = "no_cname"
-)
+const PluginType = "no_cname"
 
 func init() {
 	coremain.RegNewPersetPluginFunc("_no_cname", func(bp *coremain.BP) (coremain.Plugin, error) {
@@ -45,51 +23,62 @@ type noCNAME struct {
 	*coremain.BP
 }
 
-func (t *noCNAME) Exec(
-	ctx context.Context,
-	qCtx *query_context.Context,
-	next executable_seq.ExecutableChainNode,
-) error {
-
+// Exec strips CNAME records and flattens responses.
+//
+// PIPELINE POSITION:
+// This plugin MUST be placed at the BOTTOM of your 'exec' sequence
+// (immediately before '- _return') to process responses first.
+//
+// Example YAML:
+//   - ... (other plugins)
+//   - _no_cname    <-- Place at the BOTTOM
+//   - _return
+func (t *noCNAME) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
+	// 1. Upstream execution first (wait for response).
 	if err := executable_seq.ExecChainNode(ctx, qCtx, next); err != nil {
 		return err
 	}
 
 	r := qCtx.R()
+	// Early exit: If response is nil or Answer is empty, no modification is needed.
 	if r == nil || len(r.Answer) == 0 {
 		return nil
 	}
 
-	q := qCtx.Q()
-	if q == nil || len(q.Question) == 0 {
-		return nil
-	}
-	qName := q.Question[0].Name
+	ans := r.Answer
+	qName := r.Question[0].Name
+	writeIdx := 0
 
-	hasIP := false
-	for _, rr := range r.Answer {
-		switch rr.Header().Rrtype {
-		case dns.TypeDNAME:
-			return nil
-		case dns.TypeA, dns.TypeAAAA:
-			hasIP = true
+	// 2. UNIVERSAL IN-PLACE FLATTENING:
+	// Instead of explicit QType checks (A/AAAA), we use writeIdx as a content-based filter.
+	// - For IP queries: writeIdx increments, flattening occurs.
+	// - For non-IP queries (SRV, MX, TXT): writeIdx remains 0, returning original response.
+	// This single-pass approach is zero-allocation and handles all edge cases safely.
+	for i := 0; i < len(ans); i++ {
+		rr := ans[i]
+		rt := rr.Header().Rrtype
+
+		if rt == dns.TypeA || rt == dns.TypeAAAA {
+			// Pointer swap: rewrite name to match original question.
+			rr.Header().Name = qName
+			ans[writeIdx] = rr
+			writeIdx++
 		}
 	}
 
-	if !hasIP {
+	// 3. SAFE EXIT:
+	// If no IP records were found, return the original response as-is.
+	// This ensures we don't break non-IP queries or IP queries with no glue records.
+	if writeIdx == 0 {
 		return nil
 	}
 
-	filtered := r.Answer[:0]
+	// 4. FINAL CLEANUP:
+	// Truncate Answer in-place. Wipe Authority (Ns) and Extra (EDNS0) sections.
+	// At this stage, only pure IP records are required for the client.
+	r.Answer = ans[:writeIdx]
+	r.Ns = nil
+	r.Extra = nil
 
-	for _, rr := range r.Answer {
-		if rr.Header().Rrtype == dns.TypeCNAME {
-			continue
-		}
-		rr.Header().Name = qName
-		filtered = append(filtered, rr)
-	}
-
-	r.Answer = filtered
 	return nil
 }

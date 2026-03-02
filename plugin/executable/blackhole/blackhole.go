@@ -1,20 +1,5 @@
 /*
- * Copyright (C) 2020-2022, IrineSistiana
- *
- * This file is part of mosdns.
- *
- * mosdns is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * mosdns is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ * Copyright (C) 2020-2026, IrineSistiana
  */
 
 package blackhole
@@ -37,6 +22,7 @@ const PluginType = "blackhole"
 func init() {
 	coremain.RegNewPluginFunc(PluginType, Init, func() interface{} { return new(Args) })
 
+	// Preset plugins for common RCode responses
 	coremain.RegNewPersetPluginFunc("_drop_response", func(bp *coremain.BP) (coremain.Plugin, error) {
 		return newBlackHole(bp, &Args{RCode: -1})
 	})
@@ -66,14 +52,15 @@ type blackHole struct {
 	*coremain.BP
 	args *Args
 
+	// Pre-parsed IP addresses
 	ipv4 []netip.Addr
 	ipv6 []netip.Addr
 }
 
 type Args struct {
-	IPv4  []string `yaml:"ipv4"` // block by responding specific IP
+	IPv4  []string `yaml:"ipv4"`
 	IPv6  []string `yaml:"ipv6"`
-	RCode int      `yaml:"rcode"` // block by responding specific RCode
+	RCode int      `yaml:"rcode"`
 }
 
 func Init(bp *coremain.BP, args interface{}) (p coremain.Plugin, err error) {
@@ -84,53 +71,53 @@ func newBlackHole(bp *coremain.BP, args *Args) (*blackHole, error) {
 	b := &blackHole{BP: bp, args: args}
 	for _, s := range args.IPv4 {
 		addr, err := netip.ParseAddr(s)
-		if err != nil {
-			return nil, fmt.Errorf("invalid ipv4 addr %s, %w", s, err)
-		}
-		if !addr.Is4() {
-			return nil, fmt.Errorf("invalid ipv4 addr %s", s)
+		if err != nil || !addr.Is4() {
+			return nil, fmt.Errorf("invalid ipv4 addr: %s", s)
 		}
 		b.ipv4 = append(b.ipv4, addr)
 	}
 	for _, s := range args.IPv6 {
 		addr, err := netip.ParseAddr(s)
-		if err != nil {
-			return nil, fmt.Errorf("invalid ipv6 addr %s, %w", s, err)
-		}
-		if !addr.Is6() {
-			return nil, fmt.Errorf("invalid ipv6 addr %s", s)
+		if err != nil || !addr.Is6() {
+			return nil, fmt.Errorf("invalid ipv6 addr: %s", s)
 		}
 		b.ipv6 = append(b.ipv6, addr)
 	}
 	return b, nil
 }
 
-// Exec
-// sets qCtx.R() with IP response if query type is A/AAAA and Args.IPv4 / Args.IPv6 is not empty.
-// sets qCtx.R() with empty response with rcode = Args.RCode.
-// drops qCtx.R() if Args.RCode < 0
-// It never returns an error.
 func (b *blackHole) Exec(ctx context.Context, qCtx *query_context.Context, next executable_seq.ExecutableChainNode) error {
 	b.exec(qCtx)
 	return executable_seq.ExecChainNode(ctx, qCtx, next)
 }
 
+// exec logic invariant:
+// 1. qCtx.Q() is validated by _misc_optm (non-nil, len(Question) == 1).
 func (b *blackHole) exec(qCtx *query_context.Context) {
 	q := qCtx.Q()
-	if len(q.Question) != 1 {
+	question := q.Question[0]
+
+	// Optimization: Handle the most common case (RCode only) first to reduce branching.
+	if len(b.ipv4) == 0 && len(b.ipv6) == 0 {
+		if b.args.RCode >= 0 {
+			qCtx.SetResponse(dnsutils.GenEmptyReply(q, b.args.RCode))
+		} else {
+			qCtx.SetResponse(nil) // Drop
+		}
 		return
 	}
 
-	qName := q.Question[0].Name
-	qtype := q.Question[0].Qtype
+	qName := question.Name
+	qType := question.Qtype
 
 	switch {
-	case qtype == dns.TypeA && len(b.ipv4) > 0:
+	case qType == dns.TypeA && len(b.ipv4) > 0:
 		r := new(dns.Msg)
 		r.SetRcode(q, dns.RcodeSuccess)
 		r.RecursionAvailable = true
+		r.Answer = make([]dns.RR, 0, len(b.ipv4))
 		for _, addr := range b.ipv4 {
-			rr := &dns.A{
+			r.Answer = append(r.Answer, &dns.A{
 				Hdr: dns.RR_Header{
 					Name:   qName,
 					Rrtype: dns.TypeA,
@@ -138,17 +125,17 @@ func (b *blackHole) exec(qCtx *query_context.Context) {
 					Ttl:    3600,
 				},
 				A: addr.AsSlice(),
-			}
-			r.Answer = append(r.Answer, rr)
+			})
 		}
 		qCtx.SetResponse(r)
 
-	case qtype == dns.TypeAAAA && len(b.ipv6) > 0:
+	case qType == dns.TypeAAAA && len(b.ipv6) > 0:
 		r := new(dns.Msg)
 		r.SetRcode(q, dns.RcodeSuccess)
 		r.RecursionAvailable = true
+		r.Answer = make([]dns.RR, 0, len(b.ipv6))
 		for _, addr := range b.ipv6 {
-			rr := &dns.AAAA{
+			r.Answer = append(r.Answer, &dns.AAAA{
 				Hdr: dns.RR_Header{
 					Name:   qName,
 					Rrtype: dns.TypeAAAA,
@@ -156,17 +143,14 @@ func (b *blackHole) exec(qCtx *query_context.Context) {
 					Ttl:    3600,
 				},
 				AAAA: addr.AsSlice(),
-			}
-			r.Answer = append(r.Answer, rr)
+			})
 		}
 		qCtx.SetResponse(r)
 
 	case b.args.RCode >= 0:
-		r := dnsutils.GenEmptyReply(q, b.args.RCode)
-		qCtx.SetResponse(r)
+		qCtx.SetResponse(dnsutils.GenEmptyReply(q, b.args.RCode))
+
 	default:
 		qCtx.SetResponse(nil)
 	}
-
-	return
 }
