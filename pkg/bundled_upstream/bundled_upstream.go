@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
@@ -48,13 +47,8 @@ func ExchangeParallel(ctx context.Context, qCtx *query_context.Context, upstream
 	}
 
 	q := qCtx.Q()
-	exchangeStart := time.Now()
 	if t == 1 {
-		r, err := upstreams[0].Exchange(ctx, q)
-		if elapsed := time.Since(exchangeStart); elapsed > 500*time.Millisecond {
-			logger.Warn("slow upstream exchange", qCtx.InfoField(), zap.Duration("elapsed", elapsed), zap.String("upstream", upstreams[0].Address()))
-		}
-		return r, err
+		return upstreams[0].Exchange(ctx, q)
 	}
 
 	taskCtx, cancel := context.WithCancel(ctx)
