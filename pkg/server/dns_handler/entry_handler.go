@@ -164,15 +164,10 @@ func (h *EntryHandler) ServeDNS(ctx context.Context, req *dns.Msg, meta *query_c
 	origID := req.Id
 	queryCtx := query_context.NewContext(req, meta)
 
-	execStart := time.Now()
 	err := h.opts.Entry.Exec(qCtx, queryCtx, nil)
-	execDuration := time.Since(execStart)
 	respMsg := queryCtx.R()
 
 	// 8. Logging
-	if execDuration > 500*time.Millisecond {
-		h.opts.Logger.Warn("slow query execution", queryCtx.InfoField(), zap.Duration("duration", execDuration))
-	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			h.opts.Logger.Debug("query interrupted", queryCtx.InfoField(), zap.Error(err))
