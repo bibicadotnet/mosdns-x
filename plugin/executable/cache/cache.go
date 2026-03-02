@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
-	"github.com/golang/snappy"
 	"github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
@@ -19,7 +18,6 @@ import (
 	"github.com/pmkol/mosdns-x/pkg/cache/redis_cache"
 	"github.com/pmkol/mosdns-x/pkg/dnsutils"
 	"github.com/pmkol/mosdns-x/pkg/executable_seq"
-	"github.com/pmkol/mosdns-x/pkg/pool"
 	"github.com/pmkol/mosdns-x/pkg/query_context"
 )
 
@@ -48,22 +46,17 @@ type Args struct {
 	RedisTimeout      int    `yaml:"redis_timeout"`
 	LazyCacheTTL      int    `yaml:"lazy_cache_ttl"`
 	LazyCacheReplyTTL int    `yaml:"lazy_cache_reply_ttl"`
-	CacheEverything   bool   `yaml:"cache_everything"`
-	CompressResp      bool   `yaml:"compress_resp"`
-	WhenHit           string `yaml:"when_hit"`
 	CleanerInterval   *int   `yaml:"cleaner_interval"`
 }
 
 type cachePlugin struct {
 	*coremain.BP
-	args *Args
 
 	// Pre-computed fields for hot path performance
 	lazyEnabled   bool
 	lazyWindowSec int64
 	lazyReplyTTL  uint32
 
-	whenHit      executable_seq.Executable
 	backend      cache.Backend
 	lazyUpdateSF singleflight.Group
 
@@ -116,20 +109,9 @@ func newCachePlugin(bp *coremain.BP, args *Args) (*cachePlugin, error) {
 		c = mem_cache.NewMemCache(args.Size, interval)
 	}
 
-	var whenHit executable_seq.Executable
-	if tag := args.WhenHit; len(tag) > 0 {
-		m := bp.M().GetExecutables()
-		whenHit = m[tag]
-		if whenHit == nil {
-			return nil, fmt.Errorf("cannot find executable %s", tag)
-		}
-	}
-
 	p := &cachePlugin{
 		BP:      bp,
-		args:    args,
 		backend: c,
-		whenHit: whenHit,
 
 		lazyEnabled:   args.LazyCacheTTL > 0,
 		lazyWindowSec: int64(args.LazyCacheTTL),
@@ -180,9 +162,6 @@ func (c *cachePlugin) Exec(ctx context.Context, qCtx *query_context.Context, nex
 			c.L().Debug("cache hit", qCtx.InfoField(), zap.Int64("now", nowUnix))
 		}
 		qCtx.SetResponse(cachedResp)
-		if c.whenHit != nil {
-			return c.whenHit.Exec(ctx, qCtx, nil)
-		}
 		return nil
 	}
 
@@ -203,22 +182,6 @@ func (c *cachePlugin) lookupCache(msgKey uint64, nowUnix int64) (r *dns.Msg, laz
 	v, storedTimeUnix, backendExpireAtUnix := c.backend.Get(msgKey)
 	if v == nil {
 		return nil, false, nil
-	}
-
-	if c.args.CompressResp {
-		decodeLen, err := snappy.DecodedLen(v)
-		if err != nil {
-			return nil, false, fmt.Errorf("snappy decode len err: %w", err)
-		}
-		if decodeLen > dns.MaxMsgSize {
-			return nil, false, fmt.Errorf("invalid snappy data, data len: %d", decodeLen)
-		}
-		decompressBuf := pool.GetBuf(decodeLen)
-		defer decompressBuf.Release()
-		v, err = snappy.Decode(decompressBuf.Bytes(), v)
-		if err != nil {
-			return nil, false, fmt.Errorf("snappy decode err: %w", err)
-		}
 	}
 
 	r = new(dns.Msg)
@@ -303,9 +266,6 @@ func (c *cachePlugin) tryStoreMsg(key uint64, r *dns.Msg, nowUnix int64) error {
 	// Backend expiration = DNS TTL + Pre-computed Lazy Window.
 	expirationTimeUnix := nowUnix + int64(msgTTL/time.Second) + c.lazyWindowSec
 
-	if c.args.CompressResp {
-		v = snappy.Encode(nil, v)
-	}
 	c.backend.Store(key, v, nowUnix, expirationTimeUnix)
 	return nil
 }
