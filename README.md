@@ -41,7 +41,6 @@ For features, configuration guides, and tutorials, visit the [Wiki](https://gith
 * Compress DNS packets before sending to clients via `msg_buf`.
 * **_Cache_: Major changes from original mosdns-x; `cache_everything` is deprecated in favor of pipeline management. _ECS_ is only processed at the specific _ecs_ plugin location in the YAML.**
     * Uses `GetMsgHash` to create 8-byte cache keys (uint64 hashing), which are smaller and faster.
-    * All maps are pre-allocated based on the `size` parameter in the config and do not expand during runtime, keeping RAM usage stable.
     * When the size limit is reached, the system reuses old elements instead of allocating new ones; this mechanism eliminates GC overhead and prevents RAM spikes during high traffic.
     * Lazy cache: rewritten to be simpler, removing redundant processing.
     * Added `cleaner_interval` to allow custom cache key cleanup timing.
