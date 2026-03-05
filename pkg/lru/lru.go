@@ -28,7 +28,11 @@ func NewLRU[K comparable, V any](maxSize int, onEvict func(key K, v V)) *LRU[K, 
 		maxSize: maxSize,
 		onEvict: onEvict,
 		l:       list.New[KV[K, V]](),
-		m:       make(map[K]*list.Elem[KV[K, V]], maxSize),
+		// NOTE: Intentionally not pre-allocated (make without capacity).
+		// Pre-allocating with maxSize would reserve full RAM upfront across all cache instances,
+		// wasting memory when cache is not yet warm. Go map grows on demand instead.
+		// To pre-allocate: make(map[K]*list.Elem[KV[K, V]], maxSize)
+		m: make(map[K]*list.Elem[KV[K, V]]),
 	}
 }
 
