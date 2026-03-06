@@ -35,7 +35,7 @@ func init() {
 
 const (
 	defaultLazyUpdateTimeout = time.Second * 5
-	defaultEmptyAnswerTTL    = time.Second * 300
+	defaultEmptyAnswerTTL    = time.Second * 5
 )
 
 var _ coremain.ExecutablePlugin = (*cachePlugin)(nil)
@@ -243,7 +243,10 @@ func (c *cachePlugin) doLazyUpdate(msgKey uint64, qCtx *query_context.Context, n
 }
 
 func (c *cachePlugin) tryStoreMsg(key uint64, r *dns.Msg, nowUnix int64) error {
-	if (r.Rcode != dns.RcodeSuccess && r.Rcode != dns.RcodeNameError) || r.Truncated {
+	// NOTE: NXDOMAIN (RcodeNameError) is intentionally not cached.
+	// Caching NXDOMAIN can cause video buffering issues (e.g. *.googlevideo.com)
+	// when upstream returns transient NXDOMAIN responses.
+	if r.Rcode != dns.RcodeSuccess || r.Truncated {
 		return nil
 	}
 
