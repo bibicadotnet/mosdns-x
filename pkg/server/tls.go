@@ -238,9 +238,9 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 				return nil, errors.New("certificate not available")
 			}
 
-			if allowedSNI != "" && chi.ServerName != "" && chi.ServerName != allowedSNI {
-				return nil, errors.New("invalid sni")
-			}
+		if allowedSNI != "" && chi.ServerName != allowedSNI {
+		    return nil, errors.New("invalid sni")
+		}
 
 			return cert, nil
 		},
@@ -294,8 +294,8 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 				return nil, errors.New("certificate not available")
 			}
 
-			if allowedSNI != "" && chi.ServerName != "" && chi.ServerName != allowedSNI {
-				return nil, errors.New("invalid sni")
+			if allowedSNI != "" && chi.ServerName != allowedSNI {
+			    return nil, errors.New("invalid sni")
 			}
 
 			return cert, nil
