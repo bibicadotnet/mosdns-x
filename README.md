@@ -44,7 +44,6 @@ For features, configuration guides, and tutorials, visit the [Wiki](https://gith
     * When the size limit is reached, the system reuses old elements instead of allocating new ones; this mechanism eliminates GC overhead and prevents RAM spikes during high traffic.
     * Lazy cache: rewritten to be simpler, removing redundant processing.
     * Added `cleaner_interval` to allow custom cache key cleanup timing.
-    * Supports `NXDOMAIN` caching.
     * Optimized `concurrent_lru`, `list`, and `lru` for more efficient cache storage and deletion.
 * **_ECS_**:
     * **_ECS_** Normalization: IPs in the same range like `1.2.3.4` and `1.2.3.5` are converged to `1.2.3.0/24`, ensuring accurate cache hits.
