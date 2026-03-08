@@ -31,7 +31,6 @@ For features, configuration guides, and tutorials, visit the [Wiki](https://gith
     * Added `health_path` to provide an operational status endpoint.
     * Added `redirect_url` to automatically redirect non-DNS requests (except `health_path` and `/dns-query`) to a custom URL.
 * **Security and Privacy:**
-    * `allowed_sni` validates SNI during the TLS handshake to filter bots and unauthorized scanners; blocked requests are not logged.
     * Completely disabled client IP logging to ensure anonymity, even when logging is turned on.
 * **SSL:**
     * Connection speed: improved reconnection after server restarts; keys are stored in the `key` directory to support 0-RTT and TLS session resumption.
