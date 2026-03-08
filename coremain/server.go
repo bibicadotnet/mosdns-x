@@ -134,13 +134,13 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 		case "", "udp":
 			run = func() error { return s.ServeUDP(conn) }
 		case "quic", "doq":
-			l, err := s.CreateQUICListner(conn, []string{"doq"}, cfg.AllowedSNI)
+			l, err := s.CreateQUICListner(conn, []string{"doq"})
 			if err != nil {
 				return err
 			}
 			run = func() error { return s.ServeQUIC(l) }
 		case "h3", "doh3":
-			l, err := s.CreateQUICListner(conn, []string{"h3"}, cfg.AllowedSNI)
+			l, err := s.CreateQUICListner(conn, []string{"h3"})
 			if err != nil {
 				return err
 			}
@@ -172,7 +172,7 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 		case "tcp":
 			run = func() error { return s.ServeTCP(l) }
 		case "tls", "dot":
-			l, err = s.CreateETLSListner(l, []string{"dot"}, cfg.AllowedSNI)
+			l, err = s.CreateETLSListner(l, []string{"dot"})
 			if err != nil {
 				return err
 			}
@@ -180,7 +180,7 @@ func (m *Mosdns) startServerListener(cfg *ServerListenerConfig, dnsHandler D.Han
 		case "http":
 			run = func() error { return s.ServeHTTP(l) }
 		case "https", "doh":
-			l, err = s.CreateETLSListner(l, []string{"h2"}, cfg.AllowedSNI)
+			l, err = s.CreateETLSListner(l, []string{"h2"})
 			if err != nil {
 				return err
 			}

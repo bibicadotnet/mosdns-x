@@ -208,7 +208,7 @@ func tryCreateWatchCert[T tls.Certificate | eTLS.Certificate](certFile string, k
 	return cc, nil
 }
 
-func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, allowedSNI string) (*quic.EarlyListener, error) {
+func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string) (*quic.EarlyListener, error) {
 	if s.opts.Cert == "" || s.opts.Key == "" {
 		return nil, errors.New("missing certificate for tls listener")
 	}
@@ -219,8 +219,8 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 	}
 
 	tr := &quic.Transport{
-	    Conn:                              conn,
-	    StatelessResetKey:                 statelessResetKey,
+		Conn:              conn,
+		StatelessResetKey: statelessResetKey,
 	}
 
 	return tr.ListenEarly(&tls.Config{
@@ -238,24 +238,20 @@ func (s *Server) CreateQUICListner(conn net.PacketConn, nextProtos []string, all
 				return nil, errors.New("certificate not available")
 			}
 
-		if allowedSNI != "" && chi.ServerName != allowedSNI {
-		    return nil, errors.New("invalid sni")
-		}
-
 			return cert, nil
 		},
 	}, &quic.Config{
-	    MaxIdleTimeout:                 s.opts.IdleTimeout,
-	    Allow0RTT:                      true,
-	    DisablePathMTUDiscovery:        true,
-	    InitialStreamReceiveWindow:     1252,
-	    MaxStreamReceiveWindow:         4 * 1024,
-	    InitialConnectionReceiveWindow: 8 * 1024,
-	    MaxConnectionReceiveWindow:     16 * 1024,
+		MaxIdleTimeout:                 s.opts.IdleTimeout,
+		Allow0RTT:                      true,
+		DisablePathMTUDiscovery:        true,
+		InitialStreamReceiveWindow:     1252,
+		MaxStreamReceiveWindow:         4 * 1024,
+		InitialConnectionReceiveWindow: 8 * 1024,
+		MaxConnectionReceiveWindow:     16 * 1024,
 	})
 }
 
-func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedSNI string) (net.Listener, error) {
+func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string) (net.Listener, error) {
 	if s.opts.Cert == "" || s.opts.Key == "" {
 		return nil, errors.New("missing certificate for tls listener")
 	}
@@ -292,10 +288,6 @@ func (s *Server) CreateETLSListner(l net.Listener, nextProtos []string, allowedS
 			cert := c.get()
 			if cert == nil {
 				return nil, errors.New("certificate not available")
-			}
-
-			if allowedSNI != "" && chi.ServerName != allowedSNI {
-			    return nil, errors.New("invalid sni")
 			}
 
 			return cert, nil
